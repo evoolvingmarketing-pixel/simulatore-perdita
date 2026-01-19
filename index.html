@@ -1,805 +1,328 @@
-/* =========================
-  MARKSELLING — SIMULATORE (app.js) — PEZZO 2/3 (PARTE 1/2)
-  - Questionario completo (non superficiale)
-  - Stato S unico
-  - Rendering campi (input / radio / multi)
-  - Calcolo spreco/perdita (prudenziale) + caps
-  - Result step: placeholder report dettagliato (render completo nel pezzo 3)
-  - NO share link: rimossi bottoni copia/apri
-
-  Requisiti HTML (già nel tuo index):
-  - ms_step_question, ms_step_sub, ms_step_body
-  - ms_prog_label, ms_prog_pct, ms_prog_bar
-  - ms_err, ms_saved
-  - ms_back_btn, ms_next_btn
-========================= */
-
-(function(){
-  // ============ DOM helpers ============
-  function $(id){ return document.getElementById(id); }
-  function clamp(n,min,max){ return Math.max(min, Math.min(max, n)); }
-  function safeNum(n){ n = +n; return isFinite(n) ? n : 0; }
-  function money(x){
-    x = safeNum(x);
-    return x.toLocaleString("it-IT",{style:"currency",currency:"EUR",maximumFractionDigits:0});
-  }
-  function scrollToTopForm(){
-    try{
-      var top = $("ms_top");
-      if(top && top.scrollIntoView){
-        top.scrollIntoView({behavior:"smooth", block:"start"});
-      }
-    }catch(e){}
-  }
-  function showErr(show){
-    var el = $("ms_err");
-    if(!el) return;
-    el.style.display = show ? "block" : "none";
-  }
-  function pulseSaved(){
-    var el = $("ms_saved");
-    if(!el) return;
-    el.style.display = "block";
-    el.style.opacity = "0";
-    el.style.transform = "translateY(-6px)";
-    setTimeout(function(){
-      el.style.transition = "all .22s ease";
-      el.style.opacity = "1";
-      el.style.transform = "translateY(0)";
-    }, 10);
-    setTimeout(function(){
-      el.style.opacity = "0";
-      el.style.transform = "translateY(-6px)";
-    }, 900);
-    setTimeout(function(){
-      el.style.display = "none";
-      el.style.transition = "none";
-    }, 1150);
-  }
-
-  // ============ STATE ============
-  // Tutto ciò che l’utente risponde vive qui.
-  var S = {
-    // input economici
-    budget: null,     // budget adv mensile
-    rev: null,        // fatturato medio mensile
-
-    // CRM + automazioni
-    crmOk: null,      // CRM usato davvero come centro del processo? (yes/no)
-    crmFeat: {        // feature principali
-      tags: null,     // tag obbligatori
-      score: null,    // lead scoring
-      wf: null,       // workflow
-      alerts: null    // alert automatici
-    },
-    crmChan: {        // canali
-      wa: null,       // whatsapp automation
-      email: null
-    },
-
-    // attribuzione
-    utm: {
-      used: null,     // UTM su ogni annuncio?
-      savedInCrm: null, // UTM salvati come campi nel CRM?
-      reportByAd: null  // report per annuncio (ad/campaign/adset)?
-    },
-
-    // KPI / telemetria
-    kpi: {
-      macro: null,      // monitor macro KPI?
-      micro: null,      // monitor micro KPI?
-      daily: null,      // report giornaliero?
-      alerting: null    // alert quando peggiorano?
-    },
-
-    // allineamento mkt ↔ sales
-    align: null, // "mai" | "mensile" | "settimanale" | "giornaliero"
-
-    // vendite: regole operative
-    salesControls: {
-      c10: null,      // contatto entro 10 minuti
-      c5: null,       // 5 tentativi
-      script: null,   // script setting/closing + QA
-      rec: null       // registrazione/quality review
-    },
-
-    // feedback tag (motivi perdita) — ciò che vuoi OBBLIGATORIO
-    fb: {
-      fuori_target:false,
-      fuori_budget:false,
-      non_idoneo:false,
-      non_pronto:false,
-      fid_brand:false,
-      fid_prod:false,
-      prezzo_valore:false,
-      competitor:false,
-      non_qual:false
-    },
-
-    // report finale (cache)
-    _result: null
-  };
-
-  // ============ CAPS / LOGIC ============
-  // Stime prudenti (caps richiesti)
-  var CAPS = {
-    waste: 0.35, // max spreco budget
-    loss:  0.55  // max fatturato perso
-  };
-
-  // Pesi: aumentano spreco/perdita in base a mancanze
-  // (prudenziale, ma “tagliente” come MarkSelling)
-  var WEIGHTS = {
-    // Setup/Tracciamento
-    crmMissing:        { waste: 0.08, loss: 0.10 },
-    tagsMissing:       { waste: 0.05, loss: 0.06 },
-    scoringMissing:    { waste: 0.03, loss: 0.07 },
-    wfMissing:         { waste: 0.04, loss: 0.06 },
-    waMissing:         { waste: 0.03, loss: 0.05 },
-
-    // Attribuzione & KPI
-    utmNotUsed:        { waste: 0.08, loss: 0.05 },
-    utmNotSaved:       { waste: 0.06, loss: 0.04 },
-    noReportByAd:      { waste: 0.07, loss: 0.05 },
-    noMacroKpi:        { waste: 0.05, loss: 0.04 },
-    noMicroKpi:        { waste: 0.05, loss: 0.06 },
-    noDailyReport:     { waste: 0.05, loss: 0.05 },
-    noAlerting:        { waste: 0.04, loss: 0.05 },
-
-    // Operativo vendite
-    no10min:           { waste: 0.02, loss: 0.08 },
-    no5attempts:       { waste: 0.02, loss: 0.06 },
-    noScripts:         { waste: 0.02, loss: 0.07 },
-    noQA:              { waste: 0.02, loss: 0.05 },
-
-    // allineamento (più raro = più spreco/perdita)
-    alignNever:        { waste: 0.06, loss: 0.08 },
-    alignMonthly:      { waste: 0.04, loss: 0.06 },
-    alignWeekly:       { waste: 0.02, loss: 0.03 },
-    alignDaily:        { waste: 0.00, loss: 0.00 }
-  };
-
-  function calc(){
-    var budget = safeNum(S.budget);
-    var rev    = safeNum(S.rev);
-
-    var wastePct = 0.10; // base prudenziale
-    var lossPct  = 0.12; // base prudenziale
-
-    // CRM
-    if(S.crmOk === false){ wastePct += WEIGHTS.crmMissing.waste; lossPct += WEIGHTS.crmMissing.loss; }
-    if(S.crmFeat.tags === false){ wastePct += WEIGHTS.tagsMissing.waste; lossPct += WEIGHTS.tagsMissing.loss; }
-    if(S.crmFeat.score === false){ wastePct += WEIGHTS.scoringMissing.waste; lossPct += WEIGHTS.scoringMissing.loss; }
-    if(S.crmFeat.wf === false){ wastePct += WEIGHTS.wfMissing.waste; lossPct += WEIGHTS.wfMissing.loss; }
-    if(S.crmChan.wa === false){ wastePct += WEIGHTS.waMissing.waste; lossPct += WEIGHTS.waMissing.loss; }
-
-    // UTM / attribuzione
-    if(S.utm.used === false){ wastePct += WEIGHTS.utmNotUsed.waste; lossPct += WEIGHTS.utmNotUsed.loss; }
-    if(S.utm.savedInCrm === false){ wastePct += WEIGHTS.utmNotSaved.waste; lossPct += WEIGHTS.utmNotSaved.loss; }
-    if(S.utm.reportByAd === false){ wastePct += WEIGHTS.noReportByAd.waste; lossPct += WEIGHTS.noReportByAd.loss; }
-
-    // KPI/telemetria
-    if(S.kpi.macro === false){ wastePct += WEIGHTS.noMacroKpi.waste; lossPct += WEIGHTS.noMacroKpi.loss; }
-    if(S.kpi.micro === false){ wastePct += WEIGHTS.noMicroKpi.waste; lossPct += WEIGHTS.noMicroKpi.loss; }
-    if(S.kpi.daily === false){ wastePct += WEIGHTS.noDailyReport.waste; lossPct += WEIGHTS.noDailyReport.loss; }
-    if(S.kpi.alerting === false){ wastePct += WEIGHTS.noAlerting.waste; lossPct += WEIGHTS.noAlerting.loss; }
-
-    // Sales controls
-    if(S.salesControls.c10 === false){ wastePct += WEIGHTS.no10min.waste; lossPct += WEIGHTS.no10min.loss; }
-    if(S.salesControls.c5 === false){ wastePct += WEIGHTS.no5attempts.waste; lossPct += WEIGHTS.no5attempts.loss; }
-    if(S.salesControls.script === false){ wastePct += WEIGHTS.noScripts.waste; lossPct += WEIGHTS.noScripts.loss; }
-    if(S.salesControls.rec === false){ wastePct += WEIGHTS.noQA.waste; lossPct += WEIGHTS.noQA.loss; }
-
-    // Allineamento
-    if(S.align === "mai"){ wastePct += WEIGHTS.alignNever.waste; lossPct += WEIGHTS.alignNever.loss; }
-    else if(S.align === "mensile"){ wastePct += WEIGHTS.alignMonthly.waste; lossPct += WEIGHTS.alignMonthly.loss; }
-    else if(S.align === "settimanale"){ wastePct += WEIGHTS.alignWeekly.waste; lossPct += WEIGHTS.alignWeekly.loss; }
-    else if(S.align === "giornaliero"){ wastePct += WEIGHTS.alignDaily.waste; lossPct += WEIGHTS.alignDaily.loss; }
-
-    // caps
-    wastePct = clamp(wastePct, 0.05, CAPS.waste);
-    lossPct  = clamp(lossPct,  0.06, CAPS.loss);
-
-    var wasteEur = budget * wastePct;
-    var lossEur  = rev * lossPct;
-
-    return { budget:budget, rev:rev, wastePct:wastePct, lossPct:lossPct, wasteEur:wasteEur, lossEur:lossEur };
-  }
-
-  // ============ INPUT RENDERERS ============
-  function inputNumber(key, placeholder, hint, min){
-    var val = S[key];
-    var v = (val === null || val === undefined) ? "" : String(val);
-    var minAttr = (typeof min === "number") ? (" min=\"" + min + "\"") : "";
-    return "" +
-      "<div>" +
-        "<input class=\"ms-field\" type=\"number\" inputmode=\"numeric\" " + minAttr + " " +
-          "placeholder=\"" + esc(placeholder) + "\" value=\"" + esc(v) + "\" " +
-          "oninput=\"MS_TF.setNumber('" + key + "', this.value)\" />" +
-        (hint ? "<div class=\"ms-hint\">" + esc(hint) + "</div>" : "") +
-      "</div>";
-  }
-
-  function radioYesNo(path, yesLabel, noLabel){
-    yesLabel = yesLabel || "Sì";
-    noLabel  = noLabel  || "No";
-
-    var curr = getPath(S, path);
-    var y = (curr === true) ? " checked" : "";
-    var n = (curr === false) ? " checked" : "";
-
-    return "" +
-      "<div style=\"display:flex;gap:10px;flex-wrap:wrap;\">" +
-        radioBtn(path, true,  yesLabel, y) +
-        radioBtn(path, false, noLabel,  n) +
-      "</div>";
-  }
-
-  function radioBtn(path, val, label, checkedStr){
-    return "" +
-      "<label style=\"flex:1 1 220px; display:flex; align-items:center; gap:10px; border:1px solid rgba(11,18,32,.14); border-radius:14px; padding:12px 12px; cursor:pointer; font-weight:900;\">" +
-        "<input type=\"radio\" name=\"" + esc(path) + "\" " + checkedStr + " " +
-          "onchange=\"MS_TF.setBool('" + path + "', " + (val ? "true" : "false") + ")\" />" +
-        "<span>" + esc(label) + "</span>" +
-      "</label>";
-  }
-
-  function radioEnum(path, options){ // [{v:'mai',t:'Mai'}, ...]
-    var curr = getPath(S, path);
-    var html = "<div style=\"display:flex;gap:10px;flex-wrap:wrap;\">";
-    options.forEach(function(o){
-      var ck = (curr === o.v) ? " checked" : "";
-      html += "" +
-        "<label style=\"flex:1 1 220px; display:flex; align-items:center; gap:10px; border:1px solid rgba(11,18,32,.14); border-radius:14px; padding:12px 12px; cursor:pointer; font-weight:900;\">" +
-          "<input type=\"radio\" name=\"" + esc(path) + "\" " + ck + " " +
-            "onchange=\"MS_TF.setEnum('" + path + "', '" + esc(o.v) + "')\" />" +
-          "<span>" + esc(o.t) + "</span>" +
-        "</label>";
-    });
-    html += "</div>";
-    return html;
-  }
-
-  function multiTags(path){ // fb.*
-    // path = "fb"
-    var base = getPath(S, path) || {};
-    var rows = [
-      {k:"fuori_target",  t:"Fuori target", d:"Mismatch con pubblico ideale"},
-      {k:"fuori_budget",  t:"Fuori budget", d:"Capacità di spesa non compatibile"},
-      {k:"non_idoneo",    t:"Non idoneo", d:"Non rientra nei requisiti"},
-      {k:"non_pronto",    t:"Non pronto", d:"Timing e priorità"},
-      {k:"fid_brand",     t:"Blocco fiducia brand", d:"Autorità percepita"},
-      {k:"fid_prod",      t:"Blocco fiducia prodotto/servizio", d:"Scetticismo / prova"},
-      {k:"prezzo_valore", t:"Blocco prezzo/valore", d:"Percezione valore"},
-      {k:"competitor",    t:"Ha scelto competitor", d:"Alternativa preferita"},
-      {k:"non_qual",      t:"Non qualificato (bad data / no risposta)", d:"Reperibilità e qualità contatto"}
-    ];
-
-    var out = "" +
-      "<div style=\"border:1px solid rgba(11,18,32,.12); border-radius:16px; overflow:hidden;\">" +
-        "<div style=\"background:rgba(11,18,32,.04); padding:10px 12px; font-weight:900; font-size:12px; letter-spacing:.08em; text-transform:uppercase;\">Motivi perdita tracciati oggi</div>" +
-        "<div style=\"padding:12px; display:grid; grid-template-columns:1fr; gap:10px;\">";
-
-    rows.forEach(function(r){
-      var checked = base[r.k] ? " checked" : "";
-      out += "" +
-        "<label style=\"display:flex; gap:10px; align-items:flex-start; border:1px solid rgba(11,18,32,.12); border-radius:14px; padding:10px 12px; cursor:pointer;\">" +
-          "<input type=\"checkbox\" " + checked + " onchange=\"MS_TF.toggleTag('" + path + "." + r.k + "', this.checked)\" style=\"margin-top:2px;\" />" +
-          "<div style=\"display:flex; flex-direction:column; gap:3px;\">" +
-            "<div style=\"font-weight:900;\">" + esc(r.t) + "</div>" +
-            "<div style=\"font-size:12px; color:rgba(11,18,32,.72);\">" + esc(r.d) + "</div>" +
-          "</div>" +
-        "</label>";
-    });
-
-    out += "</div></div>";
-    out += "<div class=\"ms-hint\" style=\"margin-top:10px;\">Nel MarkSelling questi tag devono essere <b>obbligatori</b> (uno per ogni opportunità chiusa/persa) per guidare il marketing con micro-dati reali.</div>";
-    return out;
-  }
-
-  function esc(s){
-    return String(s||"")
-      .replace(/&/g,"&amp;").replace(/</g,"&lt;")
-      .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
-  }
-
-  // ============ PATH GET/SET ============
-  function getPath(obj, path){
-    var parts = String(path||"").split(".");
-    var cur = obj;
-    for(var i=0;i<parts.length;i++){
-      if(!cur) return undefined;
-      cur = cur[parts[i]];
-    }
-    return cur;
-  }
-  function setPath(obj, path, value){
-    var parts = String(path||"").split(".");
-    var cur = obj;
-    for(var i=0;i<parts.length-1;i++){
-      var p = parts[i];
-      if(cur[p] === undefined) cur[p] = {};
-      cur = cur[p];
-    }
-    cur[parts[parts.length-1]] = value;
-  }
-
-  // ============ STEPS ============
-  var steps = [];
-  function addStep(key, q, sub, render, validate){
-    steps.push({ key:key, q:q, sub:sub, render:render, validate:validate || function(){return true;} });
-  }
-
-  // --- STEP 1: Budget ADV ---
-  addStep(
-    "budget",
-    "Quanto investi ogni mese in ADV?",
-    "Risultati mensili — inserisci il budget pubblicitario che investi in un mese.",
-    function(){
-      return inputNumber(
-        "budget",
-        "Es. 1500",
-        "Inserisci solo numeri. Useremo questo dato per stimare la quota di budget che oggi non produce miglioramento misurabile.",
-        0
-      );
-    },
-    function(){
-      return safeNum(S.budget) > 0;
-    }
-  );
-
-  // --- STEP 2: Fatturato medio ---
-  addStep(
-    "rev",
-    "Qual è il tuo fatturato medio mensile?",
-    "Risultati mensili — ci serve per stimare la quota di fatturato che non viene catturata a causa di processo e controllo incompleti.",
-    function(){
-      return inputNumber(
-        "rev",
-        "Es. 50000",
-        "Inserisci solo numeri. È una stima: il report ti dirà cosa implementare per recuperare la perdita.",
-        0
-      );
-    },
-    function(){
-      return safeNum(S.rev) > 0;
-    }
-  );
-
-  // --- STEP 3: CRM centro processo ---
-  addStep(
-    "crmOk",
-    "Hai un CRM usato davvero come centro del processo?",
-    "Non “abbiamo un CRM”: intendo che ogni lead entra in pipeline, viene lavorato e tracciato (contatto, tentativi, esiti, motivi).",
-    function(){
-      return radioYesNo("crmOk", "Sì, è il centro operativo", "No, è marginale / non lo usiamo davvero");
-    },
-    function(){
-      return (S.crmOk === true || S.crmOk === false);
-    }
-  );
-
-  // --- STEP 4: UTM su ogni annuncio ---
-  addStep(
-    "utm.used",
-    "Tracci UTM su OGNI annuncio (campagna, adset, creatività)?",
-    "Se non sai esattamente da quale annuncio arriva ogni opportunità, stai ottimizzando al buio.",
-    function(){
-      return radioYesNo("utm.used", "Sì, sempre", "No / non sempre / non so");
-    },
-    function(){
-      return (S.utm.used === true || S.utm.used === false);
-    }
-  );
-
-  // --- STEP 5: UTM salvati nel CRM come campi (non note) ---
-  addStep(
-    "utm.savedInCrm",
-    "Le UTM vengono salvate nel CRM come CAMPI (non nelle note)?",
-    "Servono per report automatici: CPL/CPA e motivi perdita per singolo annuncio e pubblico.",
-    function(){
-      return radioYesNo("utm.savedInCrm", "Sì, campi dedicati", "No / finiscono in note / non vengono salvate");
-    },
-    function(){
-      return (S.utm.savedInCrm === true || S.utm.savedInCrm === false);
-    }
-  );
-
-  // --- STEP 6: Report per annuncio (ad/adset) ---
-  addStep(
-    "utm.reportByAd",
-    "Riesci a vedere KPI e motivi di perdita per SINGOLO annuncio?",
-    "Nel MarkSelling non basta il costo lead: devi vedere contatto, appuntamenti, show, chiusure e tag per annuncio.",
-    function(){
-      return radioYesNo("utm.reportByAd", "Sì, per annuncio e pubblico", "No, vedo solo KPI generici");
-    },
-    function(){
-      return (S.utm.reportByAd === true || S.utm.reportByAd === false);
-    }
-  );
-
-  // --- STEP 7: Tag obbligatori (motivi perdita) ---
-  addStep(
-    "crmFeat.tags",
-    "Hai tag obbligatori di esito (motivi mancata vendita) su ogni opportunità?",
-    "Questa è la verità che nessuna agenzia ti dirà: senza questi tag non esiste responsabilità oggettiva.",
-    function(){
-      return radioYesNo("crmFeat.tags", "Sì, obbligatori", "No / non sono standard / non obbligatori");
-    },
-    function(){
-      return (S.crmFeat.tags === true || S.crmFeat.tags === false);
-    }
-  );
-
-  // --- STEP 8: Quali motivi di perdita tracci oggi? (multi) ---
-  addStep(
-    "fb",
-    "Quali motivi di perdita tracci oggi in modo consistente?",
-    "Spunta quelli che hai già in CRM. Nel report ti dico cosa manca e come implementarlo (obbligatorio).",
-    function(){
-      return multiTags("fb");
-    },
-    function(){
-      // valida sempre (anche se non spunta nulla)
-      return true;
-    }
-  );
-
-  // --- STEP 9: Lead Scoring ---
-  addStep(
-    "crmFeat.score",
-    "Hai un sistema di Lead Scoring per contattare nel momento giusto?",
-    "Il punto non è “chiamare tutti”: è dare priorità ai caldi e nutrire i tiepidi. Senza scoring perdi i migliori.",
-    function(){
-      return radioYesNo("crmFeat.score", "Sì, con soglie e trigger", "No");
-    },
-    function(){
-      return (S.crmFeat.score === true || S.crmFeat.score === false);
-    }
-  );
-
-  // --- STEP 10: Workflow follow-up ---
-  addStep(
-    "crmFeat.wf",
-    "Hai workflow di follow-up basati su azioni tracciate (click, reply, no-show)?",
-    "Se non hai workflow, i lead vengono dimenticati e il costo opportunità esplode.",
-    function(){
-      return radioYesNo("crmFeat.wf", "Sì, con diramazioni", "No / follow-up manuale");
-    },
-    function(){
-      return (S.crmFeat.wf === true || S.crmFeat.wf === false);
-    }
-  );
-
-  // --- STEP 11: WhatsApp automations ---
-  addStep(
-    "crmChan.wa",
-    "Hai automazioni WhatsApp per contatto immediato + recupero?",
-    "Contatto istantaneo, reminder, recupero mancata risposta/no-show: è una leva enorme sul fatturato recuperato.",
-    function(){
-      return radioYesNo("crmChan.wa", "Sì", "No");
-    },
-    function(){
-      return (S.crmChan.wa === true || S.crmChan.wa === false);
-    }
-  );
-
-  // --- STEP 12: SLA contatto 10 min ---
-  addStep(
-    "salesControls.c10",
-    "Il team vendite contatta ogni lead entro 10 minuti (SLA misurabile)?",
-    "Se non misuri il tempo di primo contatto, stai pagando per lead che si raffreddano.",
-    function(){
-      return radioYesNo("salesControls.c10", "Sì, sempre (misurato)", "No / non è misurato");
-    },
-    function(){
-      return (S.salesControls.c10 === true || S.salesControls.c10 === false);
-    }
-  );
-
-  // --- STEP 13: 5 tentativi ---
-  addStep(
-    "salesControls.c5",
-    "In caso di mancata risposta, fate almeno 5 tentativi (regola standard)?",
-    "La maggior parte delle vendite perse è “silenziosa”: abbandonati troppo presto.",
-    function(){
-      return radioYesNo("salesControls.c5", "Sì", "No");
-    },
-    function(){
-      return (S.salesControls.c5 === true || S.salesControls.c5 === false);
-    }
-  );
-
-  // --- STEP 14: Script + QA ---
-  addStep(
-    "salesControls.script",
-    "Avete script di setting/closing + controllo qualità delle chiamate?",
-    "Senza script e QA, i feedback al marketing sono rumore. Con MarkSelling diventano dati utilizzabili.",
-    function(){
-      return radioYesNo("salesControls.script", "Sì, script + QA", "No");
-    },
-    function(){
-      return (S.salesControls.script === true || S.salesControls.script === false);
-    }
-  );
-
-  // --- STEP 15: Allineamento mkt ↔ sales ---
-  addStep(
-    "align",
-    "Quanto spesso marketing e vendite si allineano sui DATI (non sulle opinioni)?",
-    "Nel MarkSelling le vendite guidano il marketing: l’allineamento è una routine operativa, non una riunione casuale.",
-    function(){
-      return radioEnum("align", [
-        {v:"mai", t:"Mai / quando va male"},
-        {v:"mensile", t:"Mensile"},
-        {v:"settimanale", t:"Settimanale"},
-        {v:"giornaliero", t:"Giornaliero (o quasi)"}
-      ]);
-    },
-    function(){
-      return !!S.align;
-    }
-  );
-
-  // --- STEP 16: KPI macro ---
-  addStep(
-    "kpi.macro",
-    "Monitorate i KPI macro end-to-end (lead→contatto→app→show→vendite)?",
-    "Se misuri solo CPL, stai scegliendo “lead economici”, non vendite.",
-    function(){
-      return radioYesNo("kpi.macro", "Sì", "No / parzialmente");
-    },
-    function(){
-      return (S.kpi.macro === true || S.kpi.macro === false);
-    }
-  );
-
-  // --- STEP 17: KPI micro ---
-  addStep(
-    "kpi.micro",
-    "Monitorate KPI micro (motivo perdita per annuncio, tempo contatto, tentativi, obiezioni)?",
-    "Sono i micro-dati delle vendite che rendono scalabile l’ADV: qui nasce l’ottimizzazione vera.",
-    function(){
-      return radioYesNo("kpi.micro", "Sì", "No");
-    },
-    function(){
-      return (S.kpi.micro === true || S.kpi.micro === false);
-    }
-  );
-
-  // --- STEP 18: report giornaliero ---
-  addStep(
-    "kpi.daily",
-    "Avete report giornaliero diviso per annuncio/campagna/pubblico?",
-    "Il MarkSelling vive su interventi rapidi: se scopri i problemi a fine mese, è tardi.",
-    function(){
-      return radioYesNo("kpi.daily", "Sì", "No");
-    },
-    function(){
-      return (S.kpi.daily === true || S.kpi.daily === false);
-    }
-  );
-
-  // --- STEP 19: alert automatici ---
-  addStep(
-    "kpi.alerting",
-    "Avete alert automatici quando le metriche peggiorano?",
-    "Alert = intervento immediato. Senza alert, bruci settimane prima di accorgertene.",
-    function(){
-      return radioYesNo("kpi.alerting", "Sì", "No");
-    },
-    function(){
-      return (S.kpi.alerting === true || S.kpi.alerting === false);
-    }
-  );
-
-  // --- STEP 20: RESULT ---
-  addStep(
-    "result",
-    "Risposta",
-    "Risultati mensili — ecco la stima prudenziale e la checklist MarkSelling (report dettagliato).",
-    function(){
-      var r = calc();
-      S._result = r;
-
-      var wastePctTxt = Math.round(r.wastePct * 100) + "% (cap 35%)";
-      var lossPctTxt  = Math.round(r.lossPct  * 100) + "% (cap 55%)";
-
-      function box(title, amount, pctText, desc){
-        return "" +
-          "<div style=\"border-radius:16px; padding:14px; border:1px solid rgba(239,68,68,.28); background:rgba(239,68,68,.08); margin-bottom:12px;\">" +
-            "<div style=\"font-size:12px; font-weight:900; color:rgba(11,18,32,.92);\">" + title + "</div>" +
-            "<div style=\"display:flex; justify-content:space-between; gap:12px; align-items:baseline; margin-top:8px; flex-wrap:wrap;\">" +
-              "<div style=\"font-size:30px; font-weight:900; color:#b91c1c;\">" + money(amount) + "</div>" +
-              "<div style=\"font-size:13px; font-weight:900; color:#b91c1c;\">" + pctText + "</div>" +
-            "</div>" +
-            "<div style=\"font-size:12px; color:rgba(11,18,32,.74); line-height:1.5; margin-top:8px;\">" + desc + "</div>" +
-          "</div>";
-      }
-
-      // Executive summary
-      var out = "";
-      out += box(
-        "Budget ADV sprecato (mensile)",
-        r.wasteEur,
-        wastePctTxt,
-        "Quota prudenziale di budget che oggi non produce miglioramento misurabile (allocazione/targeting/messaggio/attribuzione)."
-      );
-      out += box(
-        "Fatturato perso (mensile)",
-        r.lossEur,
-        lossPctTxt,
-        "Quota prudenziale di fatturato potenziale non catturata per mancanza di processo, controllo operativo e sinergia vendite→marketing."
-      );
-
-      // Placeholder “report completo” (nel pezzo 3 lo sostituiamo con checklist super completa per area)
-      out += "" +
-        "<div style=\"border:1px solid rgba(11,18,32,.12); background:#fff; border-radius:18px; padding:14px; margin-top:12px;\">" +
-          "<div style=\"font-size:14px; font-weight:900; color:#0b1220;\">Checklist MarkSelling — cosa implementare</div>" +
-          "<div style=\"margin-top:6px; font-size:12px; color:rgba(11,18,32,.72); line-height:1.55;\">" +
-            "Nel prossimo blocco attiviamo il report completo in 3 aree (Setup/Tracciamento, Controllo Vendite, Vendite→Marketing) con: " +
-            "tag obbligatori, scoring, automazioni WhatsApp, workflow per azioni, script & QA call, report per annuncio, KPI macro+micro e alert." +
-          "</div>" +
-          "<ul style=\"margin:10px 0 0 0; padding-left:18px; font-size:12px; color:rgba(11,18,32,.82);\">" +
-            "<li>Tracciamento UTM e report per singolo annuncio (campagna/adset/creative)</li>" +
-            "<li>Tag obbligatori di esito (motivi perdita) e report per annuncio</li>" +
-            "<li>Lead scoring e routing: caldo/tiepido/freddo</li>" +
-            "<li>Workflow e WhatsApp: contatto immediato + recupero</li>" +
-            "<li>Regole vendite: SLA 10 min, 5 tentativi, script + controllo qualità chiamate</li>" +
-            "<li>Dashboard KPI macro+micro e alert automatici quando peggiorano</li>" +
-          "</ul>" +
-        "</div>";
-
-      // CTA (invariata)
-      out += "" +
-        "<div style=\"display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;\">" +
-          "<a href=\"https://www.markselling.it/booking-audit/\" style=\"flex:1 1 220px; text-decoration:none; text-align:center; " +
-          "background:#DC2626; color:#fff; padding:13px 14px; border-radius:14px; font-weight:900; border:1px solid rgba(0,0,0,.18);\">" +
-            "Prenota Audit" +
-          "</a>" +
-          "<button type=\"button\" onclick=\"MS_TF.back()\" style=\"flex:1 1 160px; cursor:pointer; " +
-          "border:1px solid rgba(11,18,32,.14); background:#ffffff; color:#0b1220; " +
-          "padding:13px 14px; border-radius:14px; font-weight:900;\">" +
-            "Torna alle risposte" +
-          "</button>" +
-        "</div>";
-
-      return out;
-    },
-    function(){ return true; }
-  );
-
-  // ============ ENGINE ============
-  var i = 0;
-
-  function render(){
-    var step = steps[i];
-
-    // progress
-    var pct = Math.round(((i+1) / steps.length) * 100);
-    if($("ms_prog_label")) $("ms_prog_label").textContent = "Domanda " + (i+1) + " di " + steps.length;
-    if($("ms_prog_pct")) $("ms_prog_pct").textContent = pct + "%";
-    if($("ms_prog_bar")) $("ms_prog_bar").style.width = pct + "%";
-
-    // titles
-    if($("ms_step_question")) $("ms_step_question").textContent = step.q;
-    if($("ms_step_sub")) $("ms_step_sub").textContent = step.sub;
-
-    // body
-    if($("ms_step_body")){
-      $("ms_step_body").innerHTML = step.render();
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>MarkSelling — Simulatore Spreco ADV & Fatturato Perso</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700;800;900&display=swap" rel="stylesheet">
+
+  <style>
+    :root{
+      --bg:#f6f8fb;
+      --card:#ffffff;
+      --text:#0b1220;
+      --muted:rgba(11,18,32,.72);
+      --border:rgba(11,18,32,.12);
+      --shadow:0 16px 50px rgba(11,18,32,.10);
+      --accent:#2563eb;
+      --accent2:#4f46e5;
+      --danger:#b91c1c;
+      --dangerBg:rgba(239,68,68,.08);
+      --dangerBd:rgba(239,68,68,.28);
+      --radius:22px;
     }
 
-    // buttons
-    if($("ms_back_btn")) $("ms_back_btn").style.display = (i === 0) ? "none" : "inline-flex";
-    if($("ms_next_btn")) $("ms_next_btn").textContent = (i === steps.length - 1) ? "Fine" : "Avanti →";
-
-    showErr(false);
-  }
-
-  function next(){
-    var step = steps[i];
-    if(step.validate && !step.validate()){
-      showErr(true);
-      return;
+    *{ box-sizing:border-box; }
+    body{
+      margin:0;
+      font-family:Roboto,system-ui,-apple-system,"Segoe UI",Arial,sans-serif;
+      color:var(--text);
+      background: radial-gradient(1100px 420px at 10% 0%, rgba(37,99,235,.10), transparent 60%),
+                  radial-gradient(900px 380px at 90% 10%, rgba(79,70,229,.10), transparent 55%),
+                  var(--bg);
     }
-    showErr(false);
-    pulseSaved();
 
-    if(i < steps.length - 1){
-      i++;
-      render();
-      scrollToTopForm();
+    .wrap{
+      max-width:1100px;
+      margin:0 auto;
+      padding:34px 18px 56px;
     }
-  }
 
-  function back(){
-    if(i > 0){
-      i--;
-      render();
-      scrollToTopForm();
+    /* Header */
+    .topbar{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      flex-wrap:wrap;
+      margin-bottom:16px;
     }
-  }
+    .brand{
+      display:flex;
+      flex-direction:column;
+      gap:6px;
+    }
+    .kicker{
+      font-size:12px;
+      letter-spacing:.10em;
+      text-transform:uppercase;
+      font-weight:900;
+      color:rgba(11,18,32,.55);
+    }
+    .h1{
+      font-size:34px;
+      line-height:1.05;
+      margin:0;
+      font-weight:900;
+      letter-spacing:-.02em;
+    }
 
-  function reset(){
-    // reset S
-    S.budget = null;
-    S.rev = null;
+    .top-actions{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      flex-wrap:wrap;
+    }
+    .btn{
+      appearance:none;
+      border:1px solid var(--border);
+      background:#fff;
+      color:var(--text);
+      border-radius:999px;
+      padding:10px 14px;
+      font-weight:900;
+      cursor:pointer;
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      box-shadow:0 10px 24px rgba(11,18,32,.06);
+    }
+    .btn:hover{ transform:translateY(-1px); }
+    .btn:active{ transform:translateY(0); }
 
-    S.crmOk = null;
-    S.crmFeat.tags = null;
-    S.crmFeat.score = null;
-    S.crmFeat.wf = null;
-    S.crmFeat.alerts = null;
+    /* Progress */
+    .progress{
+      border:1px solid var(--border);
+      background:rgba(255,255,255,.72);
+      backdrop-filter: blur(10px);
+      border-radius:18px;
+      padding:14px;
+      box-shadow:0 12px 34px rgba(11,18,32,.08);
+      margin:12px 0 16px;
+    }
+    .prog-row{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      flex-wrap:wrap;
+      margin-bottom:10px;
+    }
+    .prog-label{
+      font-size:13px;
+      font-weight:900;
+      color:rgba(11,18,32,.78);
+    }
+    .prog-pct{
+      font-size:13px;
+      font-weight:900;
+      color:rgba(11,18,32,.62);
+    }
+    .bar{
+      width:100%;
+      height:10px;
+      border-radius:999px;
+      background:rgba(11,18,32,.10);
+      overflow:hidden;
+    }
+    .bar > div{
+      height:100%;
+      width:0%;
+      border-radius:999px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      transition:width .25s ease;
+    }
 
-    S.crmChan.wa = null;
-    S.crmChan.email = null;
+    /* Card */
+    .card{
+      border:1px solid var(--border);
+      background:var(--card);
+      border-radius:var(--radius);
+      padding:20px;
+      box-shadow:var(--shadow);
+    }
+    .q{
+      font-size:18px;
+      font-weight:900;
+      margin:0 0 8px 0;
+      letter-spacing:-.01em;
+    }
+    .sub{
+      margin:0 0 14px 0;
+      font-size:13px;
+      color:var(--muted);
+      line-height:1.5;
+      font-weight:500;
+    }
 
-    S.utm.used = null;
-    S.utm.savedInCrm = null;
-    S.utm.reportByAd = null;
+    /* Fields */
+    .ms-field{
+      width:100%;
+      padding:14px 14px;
+      border-radius:14px;
+      border:1px solid rgba(11,18,32,.16);
+      outline:none;
+      font-size:15px;
+      font-weight:700;
+      background:#fff;
+    }
+    .ms-field:focus{
+      border-color:rgba(37,99,235,.45);
+      box-shadow:0 0 0 5px rgba(37,99,235,.12);
+    }
+    .ms-hint{
+      margin-top:10px;
+      font-size:12px;
+      color:rgba(11,18,32,.68);
+      line-height:1.45;
+      font-weight:600;
+    }
 
-    S.kpi.macro = null;
-    S.kpi.micro = null;
-    S.kpi.daily = null;
-    S.kpi.alerting = null;
+    /* Error + Saved */
+    .err{
+      display:none;
+      margin-top:12px;
+      border:1px solid var(--dangerBd);
+      background:var(--dangerBg);
+      color:var(--danger);
+      border-radius:14px;
+      padding:10px 12px;
+      font-weight:900;
+      font-size:12px;
+    }
+    .saved{
+      display:none;
+      position:fixed;
+      right:14px;
+      top:14px;
+      z-index:9999;
+      background:#111827;
+      color:#fff;
+      border:1px solid rgba(255,255,255,.14);
+      padding:10px 12px;
+      border-radius:14px;
+      font-weight:900;
+      font-size:12px;
+      box-shadow:0 16px 40px rgba(0,0,0,.25);
+    }
 
-    S.align = null;
+    /* Nav */
+    .nav{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      flex-wrap:wrap;
+      margin-top:16px;
+    }
+    .nav-left,.nav-right{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      flex-wrap:wrap;
+    }
 
-    S.salesControls.c10 = null;
-    S.salesControls.c5 = null;
-    S.salesControls.script = null;
-    S.salesControls.rec = null;
+    .btn-outline{
+      border:1px solid var(--border);
+      background:#fff;
+      color:var(--text);
+      border-radius:16px;
+      padding:12px 16px;
+      font-weight:900;
+      cursor:pointer;
+      display:inline-flex;
+      align-items:center;
+      gap:10px;
+      min-height:44px;
+    }
 
-    Object.keys(S.fb).forEach(function(k){ S.fb[k] = false; });
+    .btn-primary{
+      border:none;
+      color:#fff;
+      border-radius:16px;
+      padding:12px 18px;
+      font-weight:900;
+      cursor:pointer;
+      display:inline-flex;
+      align-items:center;
+      gap:10px;
+      min-height:44px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      box-shadow: 0 18px 42px rgba(37,99,235,.28);
+    }
 
-    S._result = null;
+    @media (max-width:640px){
+      .h1{ font-size:28px; }
+      .card{ padding:16px; }
+      .nav{ flex-direction:column; align-items:stretch; }
+      .nav-left,.nav-right{ width:100%; justify-content:space-between; }
+      .btn-outline,.btn-primary{ width:100%; justify-content:center; }
+    }
+  </style>
+</head>
 
-    i = 0;
-    render();
-    scrollToTopForm();
-  }
+<body>
+  <!-- anchor per scrollToTopForm() -->
+  <div id="ms_top"></div>
 
-  // ============ PUBLIC API (used by index.html onclick) ============
-  window.MS_TF = {
-    next: next,
-    back: back,
-    reset: reset,
+  <div class="wrap">
+    <div class="topbar">
+      <div class="brand">
+        <div class="kicker">MARKSELLING — SIMULATORE</div>
+        <h1 class="h1">Spreco ADV &amp; fatturato perso</h1>
+      </div>
 
-    setNumber: function(key, value){
-      S[key] = safeNum(value);
-    },
+      <div class="top-actions">
+        <!-- (Se vuoi riusare “Risultati mensili” come bottone rapido, lo lascio ma non serve) -->
+        <button class="btn" type="button" onclick="MS_TF.next()">
+          <span>Risultati mensili</span>
+        </button>
 
-    setBool: function(path, val){
-      setPath(S, path, !!val);
-      // dopo selezione radio, nascondi errore
-      showErr(false);
-    },
+        <button class="btn" type="button" onclick="MS_TF.reset()">
+          <span>Azzera</span>
+        </button>
+      </div>
+    </div>
 
-    setEnum: function(path, val){
-      setPath(S, path, val);
-      showErr(false);
-    },
+    <!-- PROGRESS -->
+    <div class="progress" id="ms_progress_wrap">
+      <div class="prog-row">
+        <div class="prog-label" id="ms_prog_label">Domanda 1 di 1</div>
+        <div class="prog-pct" id="ms_prog_pct">0%</div>
+      </div>
+      <div class="bar" aria-hidden="true">
+        <div id="ms_prog_bar"></div>
+      </div>
+    </div>
 
-    toggleTag: function(path, checked){
-      setPath(S, path, !!checked);
-      showErr(false);
-    },
+    <!-- CARD -->
+    <div class="card">
+      <h2 class="q" id="ms_step_question">—</h2>
+      <p class="sub" id="ms_step_sub">—</p>
 
-    // debug opzionale
-    _getState: function(){ return JSON.parse(JSON.stringify(S)); },
-    _calc: calc
-  };
+      <div id="ms_step_body"></div>
 
-  // ============ INIT ============
-  function init(){
-    render();
-  }
+      <div class="err" id="ms_err">Compila la risposta per continuare.</div>
+    </div>
 
-  if(document.readyState === "loading"){
-    document.addEventListener("DOMContentLoaded", init);
-  }else{
-    init();
-  }
+    <!-- NAV -->
+    <div class="nav" id="ms_nav">
+      <div class="nav-left">
+        <button class="btn-outline" id="ms_back_btn" type="button" onclick="MS_TF.back()">← Indietro</button>
+      </div>
+      <div class="nav-right">
+        <button class="btn-primary" id="ms_next_btn" type="button" onclick="MS_TF.next()">Avanti →</button>
+      </div>
+    </div>
+  </div>
 
-})();
+  <!-- toast “salvato” -->
+  <div class="saved" id="ms_saved">Salvato ✓</div>
+
+  <!-- ✅ CARICO IL TUO APP.JS -->
+  <script src="app.js" defer></script>
+</body>
+</html>
