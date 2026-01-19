@@ -1,887 +1,1235 @@
-/* =========================================================
-   MARKSELLING — SIMULATORE + REPORT + SHARE LINK + VIEW MODE
-   Font: Roboto (caricalo in index.html)
-   - Share URL: ?msr=...
-   - View-only mode: se msr presente -> mostra solo report
-   - Report: 3 aree + checklist operativa + KPI + alert
-========================================================= */
+/* =========================
+  MARKSELLING — SIMULATORE (app.js) — PEZZO 2/3 (PARTE 1/2)
+  - Questionario completo (non superficiale)
+  - Stato S unico
+  - Rendering campi (input / radio / multi)
+  - Calcolo spreco/perdita (prudenziale) + caps
+  - Result step: placeholder report dettagliato (render completo nel pezzo 3)
+  - NO share link: rimossi bottoni copia/apri
 
-(function () {
-  "use strict";
+  Requisiti HTML (già nel tuo index):
+  - ms_step_question, ms_step_sub, ms_step_body
+  - ms_prog_label, ms_prog_pct, ms_prog_bar
+  - ms_err, ms_saved
+  - ms_back_btn, ms_next_btn
+========================= */
 
-  /* ---------------------------
-     DOM HELPERS
-  --------------------------- */
-  function $(id) { return document.getElementById(id); }
-  function isFiniteNum(n) { return typeof n === "number" && isFinite(n); }
-  function safeNum(n) { n = +n; return isFinite(n) ? n : 0; }
-  function esc(s) {
-    return String(s || "")
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-  }
-  function money(x) {
+(function(){
+  // ============ DOM helpers ============
+  function $(id){ return document.getElementById(id); }
+  function clamp(n,min,max){ return Math.max(min, Math.min(max, n)); }
+  function safeNum(n){ n = +n; return isFinite(n) ? n : 0; }
+  function money(x){
     x = safeNum(x);
-    try {
-      return x.toLocaleString("it-IT", { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
-    } catch (e) {
-      return "€ " + Math.round(x).toString();
-    }
+    return x.toLocaleString("it-IT",{style:"currency",currency:"EUR",maximumFractionDigits:0});
   }
-
-  /* ---------------------------
-     SHARE LINK (msr=payload)
-  --------------------------- */
-  var SHARE_PARAM = "msr";
-
-  function b64urlEncode(str) {
-    var b64 = btoa(unescape(encodeURIComponent(str)));
-    return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-  }
-  function b64urlDecode(b64url) {
-    var b64 = (b64url || "").replace(/-/g, "+").replace(/_/g, "/");
-    while (b64.length % 4) b64 += "=";
-    try { return decodeURIComponent(escape(atob(b64))); } catch (e) { return null; }
-  }
-  function getSharedPayloadFromUrl() {
-    try {
-      var sp = new URLSearchParams(window.location.search);
-      var v = sp.get(SHARE_PARAM);
-      if (!v) return null;
-      var json = b64urlDecode(v);
-      if (!json) return null;
-      return JSON.parse(json);
-    } catch (e) {
-      return null;
-    }
-  }
-  function buildShareLink(payload) {
-    var url = new URL(window.location.href);
-    url.searchParams.set(SHARE_PARAM, b64urlEncode(JSON.stringify(payload)));
-    url.hash = "";
-    return url.toString();
-  }
-  async function copyToClipboard(text) {
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(text);
-        return true;
+  function scrollToTopForm(){
+    try{
+      var top = $("ms_top");
+      if(top && top.scrollIntoView){
+        top.scrollIntoView({behavior:"smooth", block:"start"});
       }
-    } catch (e) { }
-    try {
-      var ta = document.createElement("textarea");
-      ta.value = text;
-      ta.style.position = "fixed";
-      ta.style.left = "-9999px";
-      ta.style.top = "0";
-      document.body.appendChild(ta);
-      ta.focus();
-      ta.select();
-      var ok = document.execCommand("copy");
-      document.body.removeChild(ta);
-      return !!ok;
-    } catch (e2) {
-      return false;
-    }
+    }catch(e){}
+  }
+  function showErr(show){
+    var el = $("ms_err");
+    if(!el) return;
+    el.style.display = show ? "block" : "none";
+  }
+  function pulseSaved(){
+    var el = $("ms_saved");
+    if(!el) return;
+    el.style.display = "block";
+    el.style.opacity = "0";
+    el.style.transform = "translateY(-6px)";
+    setTimeout(function(){
+      el.style.transition = "all .22s ease";
+      el.style.opacity = "1";
+      el.style.transform = "translateY(0)";
+    }, 10);
+    setTimeout(function(){
+      el.style.opacity = "0";
+      el.style.transform = "translateY(-6px)";
+    }, 900);
+    setTimeout(function(){
+      el.style.display = "none";
+      el.style.transition = "none";
+    }, 1150);
   }
 
-  /* ---------------------------
-     STANDARD TAGS (MOTIVI)
-  --------------------------- */
-  var REASONS = [
-    { key: "fuori_target", label: "Fuori target", desc: "Mismatch con pubblico ideale" },
-    { key: "fuori_budget", label: "Fuori budget", desc: "Capacità di spesa non compatibile" },
-    { key: "non_idoneo", label: "Non idoneo", desc: "Non rientra nei requisiti" },
-    { key: "non_pronto", label: "Non pronto", desc: "Timing e priorità" },
-    { key: "fid_brand", label: "Blocco fiducia brand", desc: "Autorità percepita" },
-    { key: "fid_prod", label: "Blocco fiducia prodotto/servizio", desc: "Scetticismo / prova" },
-    { key: "prezzo_valore", label: "Blocco prezzo/valore", desc: "Percezione valore" },
-    { key: "competitor", label: "Ha scelto competitor", desc: "Alternativa preferita" },
-    { key: "non_qual", label: "Non qualificato (bad data / no risposta)", desc: "Reperibilità e qualità contatto" }
-  ];
+  // ============ STATE ============
+  // Tutto ciò che l’utente risponde vive qui.
+  var S = {
+    // input economici
+    budget: null,     // budget adv mensile
+    rev: null,        // fatturato medio mensile
 
-  function coverage(obj) {
-    obj = obj || {};
-    var total = REASONS.length;
-    var ok = 0;
-    REASONS.forEach(function (r) { if (!!obj[r.key]) ok++; });
-    return { total: total, ok: ok, miss: Math.max(0, total - ok) };
+    // CRM + automazioni
+    crmOk: null,      // CRM usato davvero come centro del processo? (yes/no)
+    crmFeat: {        // feature principali
+      tags: null,     // tag obbligatori
+      score: null,    // lead scoring
+      wf: null,       // workflow
+      alerts: null    // alert automatici
+    },
+    crmChan: {        // canali
+      wa: null,       // whatsapp automation
+      email: null
+    },
+
+    // attribuzione
+    utm: {
+      used: null,     // UTM su ogni annuncio?
+      savedInCrm: null, // UTM salvati come campi nel CRM?
+      reportByAd: null  // report per annuncio (ad/campaign/adset)?
+    },
+
+    // KPI / telemetria
+    kpi: {
+      macro: null,      // monitor macro KPI?
+      micro: null,      // monitor micro KPI?
+      daily: null,      // report giornaliero?
+      alerting: null    // alert quando peggiorano?
+    },
+
+    // allineamento mkt ↔ sales
+    align: null, // "mai" | "mensile" | "settimanale" | "giornaliero"
+
+    // vendite: regole operative
+    salesControls: {
+      c10: null,      // contatto entro 10 minuti
+      c5: null,       // 5 tentativi
+      script: null,   // script setting/closing + QA
+      rec: null       // registrazione/quality review
+    },
+
+    // feedback tag (motivi perdita) — ciò che vuoi OBBLIGATORIO
+    fb: {
+      fuori_target:false,
+      fuori_budget:false,
+      non_idoneo:false,
+      non_pronto:false,
+      fid_brand:false,
+      fid_prod:false,
+      prezzo_valore:false,
+      competitor:false,
+      non_qual:false
+    },
+
+    // report finale (cache)
+    _result: null
+  };
+
+  // ============ CAPS / LOGIC ============
+  // Stime prudenti (caps richiesti)
+  var CAPS = {
+    waste: 0.35, // max spreco budget
+    loss:  0.55  // max fatturato perso
+  };
+
+  // Pesi: aumentano spreco/perdita in base a mancanze
+  // (prudenziale, ma “tagliente” come MarkSelling)
+  var WEIGHTS = {
+    // Setup/Tracciamento
+    crmMissing:        { waste: 0.08, loss: 0.10 },
+    tagsMissing:       { waste: 0.05, loss: 0.06 },
+    scoringMissing:    { waste: 0.03, loss: 0.07 },
+    wfMissing:         { waste: 0.04, loss: 0.06 },
+    waMissing:         { waste: 0.03, loss: 0.05 },
+
+    // Attribuzione & KPI
+    utmNotUsed:        { waste: 0.08, loss: 0.05 },
+    utmNotSaved:       { waste: 0.06, loss: 0.04 },
+    noReportByAd:      { waste: 0.07, loss: 0.05 },
+    noMacroKpi:        { waste: 0.05, loss: 0.04 },
+    noMicroKpi:        { waste: 0.05, loss: 0.06 },
+    noDailyReport:     { waste: 0.05, loss: 0.05 },
+    noAlerting:        { waste: 0.04, loss: 0.05 },
+
+    // Operativo vendite
+    no10min:           { waste: 0.02, loss: 0.08 },
+    no5attempts:       { waste: 0.02, loss: 0.06 },
+    noScripts:         { waste: 0.02, loss: 0.07 },
+    noQA:              { waste: 0.02, loss: 0.05 },
+
+    // allineamento (più raro = più spreco/perdita)
+    alignNever:        { waste: 0.06, loss: 0.08 },
+    alignMonthly:      { waste: 0.04, loss: 0.06 },
+    alignWeekly:       { waste: 0.02, loss: 0.03 },
+    alignDaily:        { waste: 0.00, loss: 0.00 }
+  };
+
+  function calc(){
+    var budget = safeNum(S.budget);
+    var rev    = safeNum(S.rev);
+
+    var wastePct = 0.10; // base prudenziale
+    var lossPct  = 0.12; // base prudenziale
+
+    // CRM
+    if(S.crmOk === false){ wastePct += WEIGHTS.crmMissing.waste; lossPct += WEIGHTS.crmMissing.loss; }
+    if(S.crmFeat.tags === false){ wastePct += WEIGHTS.tagsMissing.waste; lossPct += WEIGHTS.tagsMissing.loss; }
+    if(S.crmFeat.score === false){ wastePct += WEIGHTS.scoringMissing.waste; lossPct += WEIGHTS.scoringMissing.loss; }
+    if(S.crmFeat.wf === false){ wastePct += WEIGHTS.wfMissing.waste; lossPct += WEIGHTS.wfMissing.loss; }
+    if(S.crmChan.wa === false){ wastePct += WEIGHTS.waMissing.waste; lossPct += WEIGHTS.waMissing.loss; }
+
+    // UTM / attribuzione
+    if(S.utm.used === false){ wastePct += WEIGHTS.utmNotUsed.waste; lossPct += WEIGHTS.utmNotUsed.loss; }
+    if(S.utm.savedInCrm === false){ wastePct += WEIGHTS.utmNotSaved.waste; lossPct += WEIGHTS.utmNotSaved.loss; }
+    if(S.utm.reportByAd === false){ wastePct += WEIGHTS.noReportByAd.waste; lossPct += WEIGHTS.noReportByAd.loss; }
+
+    // KPI/telemetria
+    if(S.kpi.macro === false){ wastePct += WEIGHTS.noMacroKpi.waste; lossPct += WEIGHTS.noMacroKpi.loss; }
+    if(S.kpi.micro === false){ wastePct += WEIGHTS.noMicroKpi.waste; lossPct += WEIGHTS.noMicroKpi.loss; }
+    if(S.kpi.daily === false){ wastePct += WEIGHTS.noDailyReport.waste; lossPct += WEIGHTS.noDailyReport.loss; }
+    if(S.kpi.alerting === false){ wastePct += WEIGHTS.noAlerting.waste; lossPct += WEIGHTS.noAlerting.loss; }
+
+    // Sales controls
+    if(S.salesControls.c10 === false){ wastePct += WEIGHTS.no10min.waste; lossPct += WEIGHTS.no10min.loss; }
+    if(S.salesControls.c5 === false){ wastePct += WEIGHTS.no5attempts.waste; lossPct += WEIGHTS.no5attempts.loss; }
+    if(S.salesControls.script === false){ wastePct += WEIGHTS.noScripts.waste; lossPct += WEIGHTS.noScripts.loss; }
+    if(S.salesControls.rec === false){ wastePct += WEIGHTS.noQA.waste; lossPct += WEIGHTS.noQA.loss; }
+
+    // Allineamento
+    if(S.align === "mai"){ wastePct += WEIGHTS.alignNever.waste; lossPct += WEIGHTS.alignNever.loss; }
+    else if(S.align === "mensile"){ wastePct += WEIGHTS.alignMonthly.waste; lossPct += WEIGHTS.alignMonthly.loss; }
+    else if(S.align === "settimanale"){ wastePct += WEIGHTS.alignWeekly.waste; lossPct += WEIGHTS.alignWeekly.loss; }
+    else if(S.align === "giornaliero"){ wastePct += WEIGHTS.alignDaily.waste; lossPct += WEIGHTS.alignDaily.loss; }
+
+    // caps
+    wastePct = clamp(wastePct, 0.05, CAPS.waste);
+    lossPct  = clamp(lossPct,  0.06, CAPS.loss);
+
+    var wasteEur = budget * wastePct;
+    var lossEur  = rev * lossPct;
+
+    return { budget:budget, rev:rev, wastePct:wastePct, lossPct:lossPct, wasteEur:wasteEur, lossEur:lossEur };
   }
 
-  /* ---------------------------
-     REPORT ENGINE — 3 AREE
-  --------------------------- */
-  function mkItem(area, title, impactEur, why, implement, kpiMacro, kpiMicro, alerts) {
-    return {
-      area: area,
-      title: title,
-      impact: safeNum(impactEur),
-      why: why || "",
-      implement: implement || [],
-      kpi_macro: kpiMacro || [],
-      kpi_micro: kpiMicro || [],
-      alerts: alerts || []
-    };
-  }
-
-  function generateDetailedReport(state, result) {
-    // result: { wastePct, lossPct, wasteEur, lossEur }
-    var waste = safeNum(result && result.wasteEur);
-    var loss = safeNum(result && result.lossEur);
-
-    var area1Pool = waste * 0.60;
-    var area2Pool = loss * 0.55;
-    var area3Pool = (waste * 0.40) + (loss * 0.45);
-
-    var rep = {
-      meta: { v: "MSR-2", created_at: new Date().toISOString() },
-      summary: {
-        wasteEur: waste, lossEur: loss,
-        wastePct: safeNum(result && result.wastePct),
-        lossPct: safeNum(result && result.lossPct),
-        totalEur: waste + loss
-      },
-      areas: {
-        a1: { title: "Area 1 — Setup & Tracciamento", items: [] },
-        a2: { title: "Area 2 — Controllo operativo vendite", items: [] },
-        a3: { title: "Area 3 — Sinergia Marketing ↔ Vendite (feedback & attribuzione)", items: [] }
-      }
-    };
-
-    // A1 — CRM / tracciamento / workflow / WA / tags
-    var crmOk = (state && state.crmOk === true);
-    var crmMissing = (state && state.crmOk === false);
-
-    if (crmMissing) {
-      rep.areas.a1.items.push(mkItem(
-        "a1",
-        "CRM non usato come centro del processo (lead, pipeline, automazioni)",
-        area1Pool * 0.35,
-        "Senza CRM non esiste controllo: il marketing ottimizza su KPI parziali e le vendite diventano improvvisazione.",
-        [
-          "Attivare un CRM operativo (lead + pipeline + automazioni).",
-          "Centralizzare TUTTI i lead nel CRM (form, WhatsApp, email, chiamate).",
-          "Definire pipeline con stati chiari e responsabilità (chi fa cosa, quando)."
-        ],
-        ["% contatto", "% appuntamenti", "% show", "% chiusura", "CPA reale (costo per vendita)"],
-        ["tempo primo contatto", "tentativi medi per lead", "lead persi/abbandonati"],
-        ["Alert se tempo primo contatto > 10 min", "Alert se % contatto scende sotto soglia"]
-      ));
-    } else if (crmOk) {
-      var f = (state && state.crmFeat) || {};
-      if (!f.score) {
-        rep.areas.a1.items.push(mkItem(
-          "a1",
-          "Integrare Lead Scoring (priorità contatto al momento giusto)",
-          area1Pool * 0.22,
-          "Senza scoring tratti tutti i lead uguali: perdi i caldi e sprechi tempo sui freddi.",
-          [
-            "Definire segnali di interesse (reply, click, visita pagina, richiesta info, call).",
-            "Assegnare punteggi e soglie: Freddo / Tiepido / Caldo.",
-            "Trigger: lead caldo → contatto immediato + notifica vendite; tiepido → nurturing; freddo → recupero programmato."
-          ],
-          ["% contatto su lead caldi", "% appuntamenti da lead caldi", "% chiusura per fascia score"],
-          ["tempo primo contatto per fascia score", "azioni tracciate prima della call"],
-          ["Alert se conversione lead caldi→appuntamento cala", "Alert se tempi contatto lead caldi > 5 min"]
-        ));
-      }
-      if (!f.wf) {
-        rep.areas.a1.items.push(mkItem(
-          "a1",
-          "Workflow automatici: follow-up strategici in base alle azioni tracciate",
-          area1Pool * 0.18,
-          "Senza workflow perdi continuità: i lead vengono dimenticati o ricontattati tardi.",
-          [
-            "Workflow immediato post-lead (0–10 min): messaggio + instradamento pipeline.",
-            "Workflow 'non risponde': sequenza 5 tentativi multicanale (WA/email/call).",
-            "Workflow 'non pronto': nurturing con contenuti + micro-CTA + ripresa contatto."
-          ],
-          ["% contatto", "% risposta", "% recupero lead non risponde", "% conversione nurturing→appuntamento"],
-          ["tempo tra tentativi", "n° tentativi per lead", "tasso reply per canale"],
-          ["Alert se lead non contattato entro SLA", "Alert se recovery rate scende"]
-        ));
-      }
-      var ch = (state && state.crmChan) || {};
-      if (!ch.wa) {
-        rep.areas.a1.items.push(mkItem(
-          "a1",
-          "Automazioni WhatsApp/SMS (contatto istantaneo + recupero)",
-          area1Pool * 0.15,
-          "WhatsApp aumenta velocità e tasso di contatto: senza, perdi i primi minuti e i lead si raffreddano.",
-          [
-            "Messaggio immediato post-lead: conferma + micro-domanda (1 click).",
-            "Reminder appuntamento (24h/2h) e no-show recovery.",
-            "Messaggi dinamici in base a tag/score (caldo/tiepido/freddo)."
-          ],
-          ["% contatto", "% show", "% no-show", "% recupero no-show"],
-          ["tempo prima risposta WA", "reply rate WA", "click rate CTA"],
-          ["Alert se no-show sale", "Alert se reply rate WA scende"]
-        ));
-      }
-    }
-
-    var fbCov = coverage((state && state.fb) || {});
-    if (fbCov.ok < REASONS.length) {
-      rep.areas.a1.items.push(mkItem(
-        "a1",
-        "Tag obbligatori su ogni lead/opportunità (motivo mancata chiusura)",
-        area1Pool * 0.25,
-        "Se i motivi NON sono tracciati, il marketing ottimizza su KPI facili e nasce lo scaricabarile.",
-        [
-          "Creare i tag standard (lista completa) e renderli obbligatori in chiusura opportunità.",
-          "Aggiungere campo 'Motivo esito' mandatory: selezione forzata.",
-          "Associare motivi → interventi (messaggio/targeting/offerta/prova sociale)."
-        ],
-        ["Top 3 motivi perdita", "Varianza motivi per fonte", "Chiusura per motivo"],
-        ["note call + obiezioni ricorrenti", "tempo in pipeline per motivo"],
-        ["Alert se 'Fuori target' supera soglia", "Alert se 'Prezzo/valore' cresce"]
-      ));
-    }
-
-    // A2 — SLA / tentativi / script / profilazione
-    var sc = (state && state.salesControls) || {};
-
-    if (!sc.script) {
-      rep.areas.a2.items.push(mkItem(
-        "a2",
-        "Script di setting e closing + controllo qualità chiamate",
-        area2Pool * 0.28,
-        "Senza script standard, le performance oscillano e i feedback sono inutilizzabili dal marketing.",
-        [
-          "Script setting: prequalifica (budget/need/timing), promessa, prossimi step.",
-          "Script closing: obiezioni principali (prezzo/valore, fiducia, competitor) + prova sociale.",
-          "Quality check: checklist call + campionamento settimanale."
-        ],
-        ["% appuntamenti→show", "% show→chiusura", "conversione per venditore"],
-        ["aderenza script (score qualità)", "obiezioni per venditore", "durata call per fase"],
-        ["Alert se conversione venditore scende", "Alert se qualità call scende sotto soglia"]
-      ));
-    }
-    if (!sc.c10) {
-      rep.areas.a2.items.push(mkItem(
-        "a2",
-        "SLA: contatto entro 10 minuti (misurato e obbligatorio)",
-        area2Pool * 0.26,
-        "Oltre i primi minuti, la probabilità di conversione crolla.",
-        [
-          "Alert immediato al venditore/setter alla creazione lead.",
-          "Regola: se non contatti entro 10 min → escalation al manager.",
-          "Dashboard: tempo medio primo contatto per fonte/campagna/venditore."
-        ],
-        ["% contatto", "% appuntamenti", "% chiusura", "CPA reale"],
-        ["tempo primo contatto", "n° lead contattati entro SLA", "lead in backlog"],
-        ["Alert se % contatto < soglia", "Alert se tempo medio primo contatto > 10 min"]
-      ));
-    }
-    if (!sc.c5) {
-      rep.areas.a2.items.push(mkItem(
-        "a2",
-        "Gestione corretta mancata risposta: 5 tentativi + recupero",
-        area2Pool * 0.20,
-        "La maggior parte delle vendite perse è “silenziosa”: lead abbandonati troppo presto.",
-        [
-          "Sequenza 5 tentativi: 0h (WA), 2h (call), 24h (WA), 72h (call), 7d (email/WA).",
-          "Tag 'Non risponde' + motivo (bad data / timing / no interesse).",
-          "Recovery: nurturing + ripresa contatto su segnali di interesse."
-        ],
-        ["% recupero non risponde", "% reply", "% appuntamenti da recovery"],
-        ["tentativi medi per lead", "tasso risposta per canale", "tempo tra tentativi"],
-        ["Alert se recovery rate scende", "Alert se tentativi medi < 5"]
-      ));
-    }
-
-    rep.areas.a2.items.push(mkItem(
-      "a2",
-      "Profilazione lead (etichette) + gestione per priorità",
-      area2Pool * 0.12,
-      "Senza profilazione i lead vengono trattati uguali: i caldi non ricevono attenzione immediata.",
-      [
-        "Etichette minime: Tipo richiesta, livello interesse, timing, budget, motivo perdita, fonte annuncio (UTM).",
-        "Routing automatico: lead caldo → venditore senior; tiepido → nurturing; freddo → recupero.",
-        "Standardizzare note post-call (obiezione + next step)."
-      ],
-      ["% chiusura per segmento", "% contatto per segmento"],
-      ["tempo contatto per segmento", "obiezioni per segmento"],
-      ["Alert se segmento 'caldo' non contattato entro SLA"]
-    ));
-
-    // A3 — report per campagna/adset + KPI/alert
-    var campCov = coverage((state && state.camp) || {});
-    var adsetCov = coverage((state && state.adset) || {});
-
-    if (campCov.ok < REASONS.length) {
-      rep.areas.a3.items.push(mkItem(
-        "a3",
-        "Reportistica quotidiana divisa per ANNUNCIO di provenienza (campagna)",
-        area3Pool * 0.26,
-        "Se non distingui i motivi per campagna, continui a finanziare campagne “che fanno lead” ma non vendono.",
-        [
-          "UTM obbligatori per ogni campagna → salvati nel CRM.",
-          "Report giornaliero: Campagna → (contatto, appuntamenti, show, chiusure, motivi perdita).",
-          "Regola: budget riallocato ogni settimana sui pubblici con qualità migliore."
-        ],
-        ["CPL per campagna", "CPA per campagna", "Appuntamenti per campagna", "Chiusure per campagna"],
-        ["Motivo perdita per campagna", "tempo contatto per campagna"],
-        ["Alert se CPA campagna peggiora", "Alert se 'Fuori target' cresce su campagna"]
-      ));
-    }
-
-    if (adsetCov.ok < REASONS.length) {
-      rep.areas.a3.items.push(mkItem(
-        "a3",
-        "Attribuzione per targeting (adset): qualità lead per PUBBLICO",
-        area3Pool * 0.18,
-        "Il vero spreco spesso è nel targeting: senza lettura per pubblico, bruci budget sui segmenti sbagliati.",
-        [
-          "UTM + parametro adset/pubblico nel CRM.",
-          "Report: Pubblico → motivi perdita + conversioni.",
-          "Spegni pubblici con motivi critici ricorrenti e scala i migliori."
-        ],
-        ["CPA per pubblico", "% chiusura per pubblico", "show rate per pubblico"],
-        ["Motivo perdita per pubblico", "obiezioni per pubblico"],
-        ["Alert se pubblico degrada su qualità", "Alert se competitor cresce su pubblico"]
-      ));
-    }
-
-    rep.areas.a3.items.push(mkItem(
-      "a3",
-      "Monitoraggio KPI (macro + micro) + alert automatici appena peggiorano",
-      area3Pool * 0.22,
-      "Senza telemetria, scopri il problema quando hai già bruciato settimane di budget.",
-      [
-        "Dashboard unica: marketing + vendite nello stesso pannello (fine scaricabarile).",
-        "Macro KPI: CPL, % contatto, % appuntamenti, % show, % chiusura, CPA reale, ROAS/ROMI.",
-        "Micro KPI: tempo primo contatto, tentativi medi, recovery rate, obiezioni top, motivi perdita per annuncio.",
-        "Alert automatici quando una metrica scende sotto soglia (email/WA al manager)."
-      ],
-      ["CPL", "% contatto", "% appuntamenti", "% show", "% chiusura", "CPA reale", "ROAS/ROMI"],
-      ["tempo primo contatto", "tentativi medi", "recovery rate", "motivo perdita per annuncio", "obiezioni top"],
-      ["Alert se % contatto cala", "Alert se no-show sale", "Alert se chiusure calano", "Alert se 'Fuori target' cresce"]
-    ));
-
-    return rep;
-  }
-
-  function renderReportHTML(payload) {
-    var rep = payload.report;
-    var sum = rep.summary;
-
-    function pill(text) {
-      return "<span style=\"display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;border:1px solid rgba(11,18,32,.12);background:#fff;font-size:12px;font-weight:900;color:rgba(11,18,32,.78);\">" + esc(text) + "</span>";
-    }
-
-    function listBlock(title, arr) {
-      if (!arr || !arr.length) return "";
-      var li = arr.map(function (x) {
-        return "<li style=\"margin:0 0 6px 0;line-height:1.45;\">" + esc(x) + "</li>";
-      }).join("");
-      return "" +
-        "<div style=\"margin-top:10px;\">" +
-        "<div style=\"font-size:12px;font-weight:900;color:rgba(11,18,32,.82);margin-bottom:8px;\">" + esc(title) + "</div>" +
-        "<ul style=\"margin:0;padding-left:18px;font-size:12px;color:rgba(11,18,32,.82);\">" + li + "</ul>" +
-        "</div>";
-    }
-
-    function itemCard(it) {
-      return "" +
-        "<div style=\"border:1px solid rgba(11,18,32,.12);background:#fff;border-radius:16px;padding:14px;margin-bottom:12px;box-shadow:0 10px 26px rgba(11,18,32,.06);\">" +
-        "<div style=\"display:flex;gap:10px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;\">" +
-        "<div style=\"min-width:240px;flex:1 1 auto;\">" +
-        "<div style=\"font-size:13px;font-weight:900;color:#0b1220;\">" + esc(it.title) + "</div>" +
-        (it.why ? "<div style=\"margin-top:6px;font-size:12px;color:rgba(11,18,32,.72);line-height:1.5;\">" + esc(it.why) + "</div>" : "") +
-        "</div>" +
-        "<div style=\"flex:0 0 auto;text-align:right;\">" +
-        "<div style=\"font-size:11px;font-weight:900;color:rgba(11,18,32,.62);\">Impatto stimato</div>" +
-        "<div style=\"font-size:18px;font-weight:900;color:#b91c1c;margin-top:2px;\">" + money(it.impact) + "</div>" +
-        "</div>" +
-        "</div>" +
-        listBlock("Cosa implementare (checklist operativa)", it.implement) +
-        listBlock("KPI Macro da monitorare", it.kpi_macro) +
-        listBlock("KPI Micro da monitorare", it.kpi_micro) +
-        listBlock("Alert consigliati", it.alerts) +
-        "</div>";
-    }
-
-    function sumArea(items) {
-      var s = 0; (items || []).forEach(function (it) { s += safeNum(it.impact); });
-      return s;
-    }
-
-    function areaBox(areaKey) {
-      var area = rep.areas[areaKey];
-      var items = area.items || [];
-      var tot = sumArea(items);
-
-      var header = "" +
-        "<div style=\"display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap;\">" +
-        "<div>" +
-        "<div style=\"font-size:14px;font-weight:900;color:#0b1220;\">" + esc(area.title) + "</div>" +
-        "<div style=\"margin-top:6px;font-size:12px;color:rgba(11,18,32,.72);line-height:1.5;\">" +
-        "Checklist completa e professionale: implementazioni specifiche, KPI e alert per portare il processo sotto controllo." +
-        "</div>" +
-        "</div>" +
-        "<div style=\"text-align:right;\">" +
-        "<div style=\"font-size:11px;font-weight:900;color:rgba(11,18,32,.62);\">Perdita stimata area</div>" +
-        "<div style=\"font-size:18px;font-weight:900;color:#b91c1c;margin-top:2px;\">" + money(tot) + "</div>" +
-        "</div>" +
-        "</div>";
-
-      var body = items.length ? items.map(itemCard).join("") :
-        "<div style=\"margin-top:10px;font-size:12px;font-weight:900;color:#065f46;border:1px solid rgba(34,197,94,.30);background:rgba(34,197,94,.10);padding:10px 12px;border-radius:14px;\">✓ Nessuna criticità evidente in questa area (ottimo).</div>";
-
-      return "" +
-        "<div style=\"border:1px solid rgba(11,18,32,.12);background:#fff;border-radius:18px;padding:14px;margin-top:12px;\">" +
-        header +
-        "<div style=\"margin-top:12px;\">" + body + "</div>" +
-        "</div>";
-    }
-
-    var shareBox = "" +
-      "<div style=\"border:1px solid rgba(11,18,32,.12);background:#ffffff;border-radius:18px;padding:14px;margin-top:12px;\">" +
-      "<div style=\"font-size:14px;font-weight:900;color:#0b1220;\">Condividi questa analisi con il tuo marketing</div>" +
-      "<div style=\"margin-top:6px;font-size:12px;color:rgba(11,18,32,.72);line-height:1.5;\">" +
-      "Copia il link univoco del report e inoltralo al team marketing/agenzia. È la base per un confronto oggettivo (niente scaricabarile)." +
-      "</div>" +
-      "<div style=\"display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;\">" +
-      "<button type=\"button\" onclick=\"MS_TF.copyShare()\" style=\"cursor:pointer;border:1px solid rgba(11,18,32,.14);background:#ffffff;color:#0b1220;padding:13px 14px;border-radius:14px;font-weight:900;flex:1 1 220px;\">Copia link report</button>" +
-      "<button type=\"button\" onclick=\"MS_TF.openShare()\" style=\"cursor:pointer;border:1px solid rgba(11,18,32,.14);background:#ffffff;color:#0b1220;padding:13px 14px;border-radius:14px;font-weight:900;flex:1 1 180px;\">Apri link</button>" +
-      "</div>" +
-      "<div id=\"ms_copy_ok\" style=\"display:none;margin-top:10px;font-size:12px;font-weight:900;color:#065f46;border:1px solid rgba(34,197,94,.30);background:rgba(34,197,94,.10);padding:10px 12px;border-radius:14px;\">✓ Link copiato. Incollalo su WhatsApp o email.</div>" +
+  // ============ INPUT RENDERERS ============
+  function inputNumber(key, placeholder, hint, min){
+    var val = S[key];
+    var v = (val === null || val === undefined) ? "" : String(val);
+    var minAttr = (typeof min === "number") ? (" min=\"" + min + "\"") : "";
+    return "" +
+      "<div>" +
+        "<input class=\"ms-field\" type=\"number\" inputmode=\"numeric\" " + minAttr + " " +
+          "placeholder=\"" + esc(placeholder) + "\" value=\"" + esc(v) + "\" " +
+          "oninput=\"MS_TF.setNumber('" + key + "', this.value)\" />" +
+        (hint ? "<div class=\"ms-hint\">" + esc(hint) + "</div>" : "") +
       "</div>";
+  }
 
-    var exec = "" +
+  function radioYesNo(path, yesLabel, noLabel){
+    yesLabel = yesLabel || "Sì";
+    noLabel  = noLabel  || "No";
+
+    var curr = getPath(S, path);
+    var y = (curr === true) ? " checked" : "";
+    var n = (curr === false) ? " checked" : "";
+
+    return "" +
       "<div style=\"display:flex;gap:10px;flex-wrap:wrap;\">" +
-      pill("Spreco ADV: " + money(sum.wasteEur)) +
-      pill("Fatturato perso: " + money(sum.lossEur)) +
-      pill("Totale stimato: " + money(sum.totalEur)) +
-      "</div>" +
-      "<div style=\"margin-top:10px;font-size:12px;color:rgba(11,18,32,.72);line-height:1.55;\">" +
-      "Questa è una checklist operativa MarkSelling: indica cosa implementare nello specifico, quali KPI monitorare e quali alert attivare per correggere subito rotta." +
+        radioBtn(path, true,  yesLabel, y) +
+        radioBtn(path, false, noLabel,  n) +
       "</div>";
+  }
 
-    var html = "";
-    html += exec;
-    html += areaBox("a1");
-    html += areaBox("a2");
-    html += areaBox("a3");
-    html += shareBox;
+  function radioBtn(path, val, label, checkedStr){
+    return "" +
+      "<label style=\"flex:1 1 220px; display:flex; align-items:center; gap:10px; border:1px solid rgba(11,18,32,.14); border-radius:14px; padding:12px 12px; cursor:pointer; font-weight:900;\">" +
+        "<input type=\"radio\" name=\"" + esc(path) + "\" " + checkedStr + " " +
+          "onchange=\"MS_TF.setBool('" + path + "', " + (val ? "true" : "false") + ")\" />" +
+        "<span>" + esc(label) + "</span>" +
+      "</label>";
+  }
 
-    html += "" +
-      "<div style=\"display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;\">" +
-      "<a href=\"https://www.markselling.it/booking-audit/\" style=\"flex:1 1 220px;text-decoration:none;text-align:center;background:#DC2626;color:#fff;padding:13px 14px;border-radius:14px;font-weight:900;border:1px solid rgba(0,0,0,.25);\">Prenota Audit</a>" +
-      "<button type=\"button\" onclick=\"MS_TF.backToAnswers()\" style=\"flex:1 1 160px;cursor:pointer;border:1px solid rgba(11,18,32,.14);background:#ffffff;color:#0b1220;padding:13px 14px;border-radius:14px;font-weight:900;\">Torna alle risposte</button>" +
-      "</div>";
-
+  function radioEnum(path, options){ // [{v:'mai',t:'Mai'}, ...]
+    var curr = getPath(S, path);
+    var html = "<div style=\"display:flex;gap:10px;flex-wrap:wrap;\">";
+    options.forEach(function(o){
+      var ck = (curr === o.v) ? " checked" : "";
+      html += "" +
+        "<label style=\"flex:1 1 220px; display:flex; align-items:center; gap:10px; border:1px solid rgba(11,18,32,.14); border-radius:14px; padding:12px 12px; cursor:pointer; font-weight:900;\">" +
+          "<input type=\"radio\" name=\"" + esc(path) + "\" " + ck + " " +
+            "onchange=\"MS_TF.setEnum('" + path + "', '" + esc(o.v) + "')\" />" +
+          "<span>" + esc(o.t) + "</span>" +
+        "</label>";
+    });
+    html += "</div>";
     return html;
   }
 
-  function makeSharePayload(state, result, report) {
-    return {
-      meta: { v: "MSR-2", created_at: new Date().toISOString() },
-      input: state,
-      result: result,
-      report: report
-    };
-  }
+  function multiTags(path){ // fb.*
+    // path = "fb"
+    var base = getPath(S, path) || {};
+    var rows = [
+      {k:"fuori_target",  t:"Fuori target", d:"Mismatch con pubblico ideale"},
+      {k:"fuori_budget",  t:"Fuori budget", d:"Capacità di spesa non compatibile"},
+      {k:"non_idoneo",    t:"Non idoneo", d:"Non rientra nei requisiti"},
+      {k:"non_pronto",    t:"Non pronto", d:"Timing e priorità"},
+      {k:"fid_brand",     t:"Blocco fiducia brand", d:"Autorità percepita"},
+      {k:"fid_prod",      t:"Blocco fiducia prodotto/servizio", d:"Scetticismo / prova"},
+      {k:"prezzo_valore", t:"Blocco prezzo/valore", d:"Percezione valore"},
+      {k:"competitor",    t:"Ha scelto competitor", d:"Alternativa preferita"},
+      {k:"non_qual",      t:"Non qualificato (bad data / no risposta)", d:"Reperibilità e qualità contatto"}
+    ];
 
-  /* ---------------------------
-     MS_TF PUBLIC API
-  --------------------------- */
-  window.MS_TF = window.MS_TF || {};
-  window.MS_TF._report = {
-    generateDetailedReport: generateDetailedReport,
-    renderReportHTML: renderReportHTML,
-    makeSharePayload: makeSharePayload,
-    buildShareLink: buildShareLink,
-    getSharedPayloadFromUrl: getSharedPayloadFromUrl
-  };
+    var out = "" +
+      "<div style=\"border:1px solid rgba(11,18,32,.12); border-radius:16px; overflow:hidden;\">" +
+        "<div style=\"background:rgba(11,18,32,.04); padding:10px 12px; font-weight:900; font-size:12px; letter-spacing:.08em; text-transform:uppercase;\">Motivi perdita tracciati oggi</div>" +
+        "<div style=\"padding:12px; display:grid; grid-template-columns:1fr; gap:10px;\">";
 
-  window.MS_TF.copyShare = async function () {
-    try {
-      var payload = window.MS_TF._lastSharePayload;
-      if (!payload) return;
-      var link = buildShareLink(payload);
-      var ok = await copyToClipboard(link);
-      var box = $("ms_copy_ok");
-      if (ok && box) {
-        box.style.display = "block";
-        setTimeout(function () { box.style.display = "none"; }, 2200);
-      }
-      if (!ok) alert("Copia manualmente questo link:\n\n" + link);
-    } catch (e) { }
-  };
-
-  window.MS_TF.openShare = function () {
-    try {
-      var payload = window.MS_TF._lastSharePayload;
-      if (!payload) return;
-      var link = buildShareLink(payload);
-      window.open(link, "_blank");
-    } catch (e) { }
-  };
-
-  window.MS_TF.backToAnswers = function () {
-    if (window.MS_TF && typeof window.MS_TF.back === "function") window.MS_TF.back();
-  };
-
-  /* ---------------------------
-     TYPEFORM-LIKE ENGINE
-  --------------------------- */
-
-  // State (risposte)
-  var S = {};
-
-  // Steps
-  var STEPS = [];
-  function addStep(id, q, sub, renderFn, validateFn) {
-    STEPS.push({
-      id: id,
-      q: q,
-      sub: sub || "",
-      render: renderFn,
-      validate: validateFn || function () { return true; }
+    rows.forEach(function(r){
+      var checked = base[r.k] ? " checked" : "";
+      out += "" +
+        "<label style=\"display:flex; gap:10px; align-items:flex-start; border:1px solid rgba(11,18,32,.12); border-radius:14px; padding:10px 12px; cursor:pointer;\">" +
+          "<input type=\"checkbox\" " + checked + " onchange=\"MS_TF.toggleTag('" + path + "." + r.k + "', this.checked)\" style=\"margin-top:2px;\" />" +
+          "<div style=\"display:flex; flex-direction:column; gap:3px;\">" +
+            "<div style=\"font-weight:900;\">" + esc(r.t) + "</div>" +
+            "<div style=\"font-size:12px; color:rgba(11,18,32,.72);\">" + esc(r.d) + "</div>" +
+          "</div>" +
+        "</label>";
     });
+
+    out += "</div></div>";
+    out += "<div class=\"ms-hint\" style=\"margin-top:10px;\">Nel MarkSelling questi tag devono essere <b>obbligatori</b> (uno per ogni opportunità chiusa/persa) per guidare il marketing con micro-dati reali.</div>";
+    return out;
   }
 
-  var idx = 0;
-
-  function setErr(msg) {
-    var el = $("ms_err");
-    if (!el) return;
-    if (!msg) {
-      el.style.display = "none";
-      el.textContent = "";
-      return;
-    }
-    el.style.display = "block";
-    el.textContent = msg;
+  function esc(s){
+    return String(s||"")
+      .replace(/&/g,"&amp;").replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
   }
 
-  function setProgress() {
-    var wrap = $("ms_progress_wrap");
-    var bar = $("ms_progress_bar");
-    if (!wrap || !bar) return;
-    var p = STEPS.length ? ((idx + 1) / STEPS.length) * 100 : 0;
-    bar.style.width = Math.max(2, Math.min(100, p)).toFixed(2) + "%";
-  }
-
-  function renderCurrent() {
-    setErr("");
-    setProgress();
-
-    var step = STEPS[idx];
-    if (!step) return;
-
-    var q = $("ms_step_question");
-    var sub = $("ms_step_sub");
-    var body = $("ms_step_body");
-
-    if (q) q.textContent = step.q;
-    if (sub) sub.textContent = step.sub;
-    if (body) body.innerHTML = step.render();
-
-    var backBtn = $("ms_back_btn");
-    var nextBtn = $("ms_next_btn");
-
-    if (backBtn) backBtn.style.display = idx === 0 ? "none" : "inline-flex";
-    if (nextBtn) nextBtn.textContent = (step.id === "result") ? "Fine" : "Avanti";
-  }
-
-  function next() {
-    var step = STEPS[idx];
-    if (!step) return;
-
-    try {
-      var ok = step.validate ? step.validate() : true;
-      if (!ok) return;
-    } catch (e) {
-      setErr("Controlla i campi e riprova.");
-      return;
-    }
-
-    if (idx < STEPS.length - 1) {
-      idx++;
-      renderCurrent();
-      scrollTopSafe();
-    }
-  }
-
-  function back() {
-    if (idx > 0) {
-      idx--;
-      renderCurrent();
-      scrollTopSafe();
-    }
-  }
-
-  function scrollTopSafe() {
-    try {
-      var top = $("ms_top");
-      if (top && top.scrollIntoView) top.scrollIntoView({ behavior: "smooth", block: "start" });
-    } catch (e) { }
-  }
-
-  window.MS_TF.next = next;
-  window.MS_TF.back = back;
-
-  /* ---------------------------
-     CALC (prudenziale)
-     - wastePct cap 35%
-     - lossPct cap 55%
-  --------------------------- */
-  function calc() {
-    var adv = safeNum(S.advSpend);
-    var rev = safeNum(S.monthRevenue);
-
-    // base
-    var wastePct = 0.12; // 12% base
-    var lossPct = 0.18;  // 18% base
-
-    // penalità per assenza controllo
-    if (S.crmOk === false) wastePct += 0.10;
-    if (!S.salesControls || S.salesControls.c10 !== true) lossPct += 0.10;
-    if (!S.salesControls || S.salesControls.c5 !== true) lossPct += 0.07;
-    if (!S.salesControls || S.salesControls.script !== true) lossPct += 0.06;
-
-    // se manca WA/workflow/score => spreco e perdita
-    if (!S.crmFeat || S.crmFeat.wf !== true) { wastePct += 0.04; lossPct += 0.03; }
-    if (!S.crmFeat || S.crmFeat.score !== true) { wastePct += 0.02; lossPct += 0.04; }
-    if (!S.crmChan || S.crmChan.wa !== true) { wastePct += 0.03; lossPct += 0.02; }
-
-    // cap
-    wastePct = Math.min(0.35, Math.max(0.05, wastePct));
-    lossPct = Math.min(0.55, Math.max(0.08, lossPct));
-
-    var wasteEur = adv * wastePct;
-    var lossEur = rev * lossPct;
-
-    return {
-      wastePct: wastePct,
-      lossPct: lossPct,
-      wasteEur: wasteEur,
-      lossEur: lossEur
-    };
-  }
-
-  /* ---------------------------
-     UI COMPONENTS (HTML)
-  --------------------------- */
-  function inputRow(label, html) {
-    return "" +
-      "<div style=\"margin:0 0 12px 0;\">" +
-      "<div style=\"font-size:12px;font-weight:900;color:rgba(11,18,32,.80);margin-bottom:6px;\">" + esc(label) + "</div>" +
-      html +
-      "</div>";
-  }
-
-  function numInput(id, placeholder) {
-    return "<input id=\"" + esc(id) + "\" inputmode=\"numeric\" style=\"width:100%;padding:14px;border-radius:14px;border:1px solid rgba(11,18,32,.14);font-size:14px;font-weight:800;outline:none;\" placeholder=\"" + esc(placeholder || "") + "\" />";
-  }
-
-  function yesNo(id, yesLabel, noLabel, val) {
-    var y = (val === true), n = (val === false);
-    return "" +
-      "<div style=\"display:flex;gap:10px;flex-wrap:wrap;\">" +
-      "<button type=\"button\" data-yn=\"" + esc(id) + "\" data-v=\"1\" style=\"flex:1 1 160px;cursor:pointer;padding:14px;border-radius:14px;border:1px solid rgba(11,18,32,.14);font-weight:900;background:" + (y ? "#0b1220" : "#fff") + ";color:" + (y ? "#fff" : "#0b1220") + ";\">"+esc(yesLabel||"Sì")+"</button>" +
-      "<button type=\"button\" data-yn=\"" + esc(id) + "\" data-v=\"0\" style=\"flex:1 1 160px;cursor:pointer;padding:14px;border-radius:14px;border:1px solid rgba(11,18,32,.14);font-weight:900;background:" + (n ? "#0b1220" : "#fff") + ";color:" + (n ? "#fff" : "#0b1220") + ";\">"+esc(noLabel||"No")+"</button>" +
-      "</div>";
-  }
-
-  function bindYesNo() {
-    var body = $("ms_step_body");
-    if (!body) return;
-    body.querySelectorAll("button[data-yn]").forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        var key = btn.getAttribute("data-yn");
-        var v = btn.getAttribute("data-v") === "1";
-        // support nested keys like "crmFeat.score"
-        setByPath(S, key, v);
-        renderCurrent();
-      });
-    });
-  }
-
-  function setByPath(obj, path, value) {
-    if (!path) return;
-    var parts = path.split(".");
+  // ============ PATH GET/SET ============
+  function getPath(obj, path){
+    var parts = String(path||"").split(".");
     var cur = obj;
-    for (var i = 0; i < parts.length - 1; i++) {
-      var p = parts[i];
-      if (!cur[p] || typeof cur[p] !== "object") cur[p] = {};
-      cur = cur[p];
-    }
-    cur[parts[parts.length - 1]] = value;
-  }
-  function getByPath(obj, path) {
-    if (!path) return undefined;
-    var parts = path.split(".");
-    var cur = obj;
-    for (var i = 0; i < parts.length; i++) {
-      if (!cur || typeof cur !== "object") return undefined;
+    for(var i=0;i<parts.length;i++){
+      if(!cur) return undefined;
       cur = cur[parts[i]];
     }
     return cur;
   }
+  function setPath(obj, path, value){
+    var parts = String(path||"").split(".");
+    var cur = obj;
+    for(var i=0;i<parts.length-1;i++){
+      var p = parts[i];
+      if(cur[p] === undefined) cur[p] = {};
+      cur = cur[p];
+    }
+    cur[parts[parts.length-1]] = value;
+  }
 
-  /* ---------------------------
-     STEPS (base demo solido)
-     -> puoi cambiarli, ma il risultato resta stabile
-  --------------------------- */
+  // ============ STEPS ============
+  var steps = [];
+  function addStep(key, q, sub, render, validate){
+    steps.push({ key:key, q:q, sub:sub, render:render, validate:validate || function(){return true;} });
+  }
 
+  // --- STEP 1: Budget ADV ---
   addStep(
-    "start",
-    "Calcola quanto stai perdendo ogni mese",
-    "Stima prudenziale: spreco ADV + fatturato perso per assenza di controllo tra marketing e vendite.",
-    function () {
-      var html = "";
-      html += inputRow("Budget ADV mensile", numInput("advSpend", "Es. 3000"));
-      html += inputRow("Fatturato medio mensile", numInput("monthRevenue", "Es. 25000"));
-      html += "<div style=\"margin-top:10px;font-size:12px;color:rgba(11,18,32,.70);line-height:1.55;\">Inserisci numeri realistici. Se non li sai precisi, usa una media prudenziale.</div>";
-      return html;
+    "budget",
+    "Quanto investi ogni mese in ADV?",
+    "Risultati mensili — inserisci il budget pubblicitario che investi in un mese.",
+    function(){
+      return inputNumber(
+        "budget",
+        "Es. 1500",
+        "Inserisci solo numeri. Useremo questo dato per stimare la quota di budget che oggi non produce miglioramento misurabile.",
+        0
+      );
     },
-    function () {
-      var advEl = $("advSpend");
-      var revEl = $("monthRevenue");
-      var adv = safeNum(advEl && advEl.value);
-      var rev = safeNum(revEl && revEl.value);
-      if (adv <= 0) { setErr("Inserisci un budget ADV mensile valido."); return false; }
-      if (rev <= 0) { setErr("Inserisci un fatturato medio mensile valido."); return false; }
-      S.advSpend = adv;
-      S.monthRevenue = rev;
-      return true;
+    function(){
+      return safeNum(S.budget) > 0;
     }
   );
 
+  // --- STEP 2: Fatturato medio ---
   addStep(
-    "crm",
+    "rev",
+    "Qual è il tuo fatturato medio mensile?",
+    "Risultati mensili — ci serve per stimare la quota di fatturato che non viene catturata a causa di processo e controllo incompleti.",
+    function(){
+      return inputNumber(
+        "rev",
+        "Es. 50000",
+        "Inserisci solo numeri. È una stima: il report ti dirà cosa implementare per recuperare la perdita.",
+        0
+      );
+    },
+    function(){
+      return safeNum(S.rev) > 0;
+    }
+  );
+
+  // --- STEP 3: CRM centro processo ---
+  addStep(
+    "crmOk",
     "Hai un CRM usato davvero come centro del processo?",
-    "Non “un foglio Excel”: intendo pipeline, automazioni, stato lead, responsabilità e follow-up misurato.",
-    function () {
-      return yesNo("crmOk", "Sì, CRM operativo", "No, non operativo", getByPath(S, "crmOk"));
+    "Non “abbiamo un CRM”: intendo che ogni lead entra in pipeline, viene lavorato e tracciato (contatto, tentativi, esiti, motivi).",
+    function(){
+      return radioYesNo("crmOk", "Sì, è il centro operativo", "No, è marginale / non lo usiamo davvero");
     },
-    function () { return (S.crmOk === true || S.crmOk === false) || (setErr("Seleziona una risposta."), false); }
+    function(){
+      return (S.crmOk === true || S.crmOk === false);
+    }
   );
 
+  // --- STEP 4: UTM su ogni annuncio ---
   addStep(
-    "automation",
-    "Hai automazioni e WhatsApp per contatto immediato + recupero?",
-    "Qui si decide la velocità: se non contatti subito, il lead si raffredda.",
-    function () {
-      var html = "";
-      html += inputRow("Workflow automatici (follow-up, nurturing, recupero)", yesNo("crmFeat.wf", "Sì", "No", getByPath(S, "crmFeat.wf")));
-      html += "<div style=\"height:10px\"></div>";
-      html += inputRow("Lead Scoring (caldo/tiepido/freddo)", yesNo("crmFeat.score", "Sì", "No", getByPath(S, "crmFeat.score")));
-      html += "<div style=\"height:10px\"></div>";
-      html += inputRow("WhatsApp/SMS automatico post-lead", yesNo("crmChan.wa", "Sì", "No", getByPath(S, "crmChan.wa")));
-      return html;
+    "utm.used",
+    "Tracci UTM su OGNI annuncio (campagna, adset, creatività)?",
+    "Se non sai esattamente da quale annuncio arriva ogni opportunità, stai ottimizzando al buio.",
+    function(){
+      return radioYesNo("utm.used", "Sì, sempre", "No / non sempre / non so");
     },
-    function () {
-      // non blocco: se non risponde a tutti, ok. Ma almeno 1 selezione fatta:
-      var wf = getByPath(S, "crmFeat.wf");
-      var sc = getByPath(S, "crmFeat.score");
-      var wa = getByPath(S, "crmChan.wa");
-      if (wf === undefined && sc === undefined && wa === undefined) { setErr("Seleziona almeno una risposta."); return false; }
+    function(){
+      return (S.utm.used === true || S.utm.used === false);
+    }
+  );
+
+  // --- STEP 5: UTM salvati nel CRM come campi (non note) ---
+  addStep(
+    "utm.savedInCrm",
+    "Le UTM vengono salvate nel CRM come CAMPI (non nelle note)?",
+    "Servono per report automatici: CPL/CPA e motivi perdita per singolo annuncio e pubblico.",
+    function(){
+      return radioYesNo("utm.savedInCrm", "Sì, campi dedicati", "No / finiscono in note / non vengono salvate");
+    },
+    function(){
+      return (S.utm.savedInCrm === true || S.utm.savedInCrm === false);
+    }
+  );
+
+  // --- STEP 6: Report per annuncio (ad/adset) ---
+  addStep(
+    "utm.reportByAd",
+    "Riesci a vedere KPI e motivi di perdita per SINGOLO annuncio?",
+    "Nel MarkSelling non basta il costo lead: devi vedere contatto, appuntamenti, show, chiusure e tag per annuncio.",
+    function(){
+      return radioYesNo("utm.reportByAd", "Sì, per annuncio e pubblico", "No, vedo solo KPI generici");
+    },
+    function(){
+      return (S.utm.reportByAd === true || S.utm.reportByAd === false);
+    }
+  );
+
+  // --- STEP 7: Tag obbligatori (motivi perdita) ---
+  addStep(
+    "crmFeat.tags",
+    "Hai tag obbligatori di esito (motivi mancata vendita) su ogni opportunità?",
+    "Questa è la verità che nessuna agenzia ti dirà: senza questi tag non esiste responsabilità oggettiva.",
+    function(){
+      return radioYesNo("crmFeat.tags", "Sì, obbligatori", "No / non sono standard / non obbligatori");
+    },
+    function(){
+      return (S.crmFeat.tags === true || S.crmFeat.tags === false);
+    }
+  );
+
+  // --- STEP 8: Quali motivi di perdita tracci oggi? (multi) ---
+  addStep(
+    "fb",
+    "Quali motivi di perdita tracci oggi in modo consistente?",
+    "Spunta quelli che hai già in CRM. Nel report ti dico cosa manca e come implementarlo (obbligatorio).",
+    function(){
+      return multiTags("fb");
+    },
+    function(){
+      // valida sempre (anche se non spunta nulla)
       return true;
     }
   );
 
+  // --- STEP 9: Lead Scoring ---
   addStep(
-    "sales",
-    "Il team vendite rispetta regole operative misurabili?",
-    "Contatto entro 10 minuti, 5 tentativi se non risponde, script e controllo qualità.",
-    function () {
-      var html = "";
-      html += inputRow("Contatto entro 10 minuti (SLA)", yesNo("salesControls.c10", "Sì", "No", getByPath(S, "salesControls.c10")));
-      html += "<div style=\"height:10px\"></div>";
-      html += inputRow("5 tentativi minimi se non risponde", yesNo("salesControls.c5", "Sì", "No", getByPath(S, "salesControls.c5")));
-      html += "<div style=\"height:10px\"></div>";
-      html += inputRow("Script + controllo qualità chiamate", yesNo("salesControls.script", "Sì", "No", getByPath(S, "salesControls.script")));
-      return html;
+    "crmFeat.score",
+    "Hai un sistema di Lead Scoring per contattare nel momento giusto?",
+    "Il punto non è “chiamare tutti”: è dare priorità ai caldi e nutrire i tiepidi. Senza scoring perdi i migliori.",
+    function(){
+      return radioYesNo("crmFeat.score", "Sì, con soglie e trigger", "No");
     },
-    function () {
-      var c10 = getByPath(S, "salesControls.c10");
-      var c5 = getByPath(S, "salesControls.c5");
-      var script = getByPath(S, "salesControls.script");
-      if (c10 === undefined && c5 === undefined && script === undefined) { setErr("Seleziona almeno una risposta."); return false; }
-      return true;
+    function(){
+      return (S.crmFeat.score === true || S.crmFeat.score === false);
     }
   );
 
+  // --- STEP 10: Workflow follow-up ---
+  addStep(
+    "crmFeat.wf",
+    "Hai workflow di follow-up basati su azioni tracciate (click, reply, no-show)?",
+    "Se non hai workflow, i lead vengono dimenticati e il costo opportunità esplode.",
+    function(){
+      return radioYesNo("crmFeat.wf", "Sì, con diramazioni", "No / follow-up manuale");
+    },
+    function(){
+      return (S.crmFeat.wf === true || S.crmFeat.wf === false);
+    }
+  );
+
+  // --- STEP 11: WhatsApp automations ---
+  addStep(
+    "crmChan.wa",
+    "Hai automazioni WhatsApp per contatto immediato + recupero?",
+    "Contatto istantaneo, reminder, recupero mancata risposta/no-show: è una leva enorme sul fatturato recuperato.",
+    function(){
+      return radioYesNo("crmChan.wa", "Sì", "No");
+    },
+    function(){
+      return (S.crmChan.wa === true || S.crmChan.wa === false);
+    }
+  );
+
+  // --- STEP 12: SLA contatto 10 min ---
+  addStep(
+    "salesControls.c10",
+    "Il team vendite contatta ogni lead entro 10 minuti (SLA misurabile)?",
+    "Se non misuri il tempo di primo contatto, stai pagando per lead che si raffreddano.",
+    function(){
+      return radioYesNo("salesControls.c10", "Sì, sempre (misurato)", "No / non è misurato");
+    },
+    function(){
+      return (S.salesControls.c10 === true || S.salesControls.c10 === false);
+    }
+  );
+
+  // --- STEP 13: 5 tentativi ---
+  addStep(
+    "salesControls.c5",
+    "In caso di mancata risposta, fate almeno 5 tentativi (regola standard)?",
+    "La maggior parte delle vendite perse è “silenziosa”: abbandonati troppo presto.",
+    function(){
+      return radioYesNo("salesControls.c5", "Sì", "No");
+    },
+    function(){
+      return (S.salesControls.c5 === true || S.salesControls.c5 === false);
+    }
+  );
+
+  // --- STEP 14: Script + QA ---
+  addStep(
+    "salesControls.script",
+    "Avete script di setting/closing + controllo qualità delle chiamate?",
+    "Senza script e QA, i feedback al marketing sono rumore. Con MarkSelling diventano dati utilizzabili.",
+    function(){
+      return radioYesNo("salesControls.script", "Sì, script + QA", "No");
+    },
+    function(){
+      return (S.salesControls.script === true || S.salesControls.script === false);
+    }
+  );
+
+  // --- STEP 15: Allineamento mkt ↔ sales ---
+  addStep(
+    "align",
+    "Quanto spesso marketing e vendite si allineano sui DATI (non sulle opinioni)?",
+    "Nel MarkSelling le vendite guidano il marketing: l’allineamento è una routine operativa, non una riunione casuale.",
+    function(){
+      return radioEnum("align", [
+        {v:"mai", t:"Mai / quando va male"},
+        {v:"mensile", t:"Mensile"},
+        {v:"settimanale", t:"Settimanale"},
+        {v:"giornaliero", t:"Giornaliero (o quasi)"}
+      ]);
+    },
+    function(){
+      return !!S.align;
+    }
+  );
+
+  // --- STEP 16: KPI macro ---
+  addStep(
+    "kpi.macro",
+    "Monitorate i KPI macro end-to-end (lead→contatto→app→show→vendite)?",
+    "Se misuri solo CPL, stai scegliendo “lead economici”, non vendite.",
+    function(){
+      return radioYesNo("kpi.macro", "Sì", "No / parzialmente");
+    },
+    function(){
+      return (S.kpi.macro === true || S.kpi.macro === false);
+    }
+  );
+
+  // --- STEP 17: KPI micro ---
+  addStep(
+    "kpi.micro",
+    "Monitorate KPI micro (motivo perdita per annuncio, tempo contatto, tentativi, obiezioni)?",
+    "Sono i micro-dati delle vendite che rendono scalabile l’ADV: qui nasce l’ottimizzazione vera.",
+    function(){
+      return radioYesNo("kpi.micro", "Sì", "No");
+    },
+    function(){
+      return (S.kpi.micro === true || S.kpi.micro === false);
+    }
+  );
+
+  // --- STEP 18: report giornaliero ---
+  addStep(
+    "kpi.daily",
+    "Avete report giornaliero diviso per annuncio/campagna/pubblico?",
+    "Il MarkSelling vive su interventi rapidi: se scopri i problemi a fine mese, è tardi.",
+    function(){
+      return radioYesNo("kpi.daily", "Sì", "No");
+    },
+    function(){
+      return (S.kpi.daily === true || S.kpi.daily === false);
+    }
+  );
+
+  // --- STEP 19: alert automatici ---
+  addStep(
+    "kpi.alerting",
+    "Avete alert automatici quando le metriche peggiorano?",
+    "Alert = intervento immediato. Senza alert, bruci settimane prima di accorgertene.",
+    function(){
+      return radioYesNo("kpi.alerting", "Sì", "No");
+    },
+    function(){
+      return (S.kpi.alerting === true || S.kpi.alerting === false);
+    }
+  );
+
+  // --- STEP 20: RESULT ---
   addStep(
     "result",
-    "Risultati",
-    "Risultati mensili — ecco la stima prudenziale e la reportistica MarkSelling dettagliata.",
-    function () {
+    "Risposta",
+    "Risultati mensili — ecco la stima prudenziale e la checklist MarkSelling (report dettagliato).",
+    function(){
       var r = calc();
-      var report = generateDetailedReport(S, r);
-      var payload = makeSharePayload(S, r, report);
-      window.MS_TF._lastSharePayload = payload;
-      return renderReportHTML(payload);
+      S._result = r;
+
+      var wastePctTxt = Math.round(r.wastePct * 100) + "% (cap 35%)";
+      var lossPctTxt  = Math.round(r.lossPct  * 100) + "% (cap 55%)";
+
+      function box(title, amount, pctText, desc){
+        return "" +
+          "<div style=\"border-radius:16px; padding:14px; border:1px solid rgba(239,68,68,.28); background:rgba(239,68,68,.08); margin-bottom:12px;\">" +
+            "<div style=\"font-size:12px; font-weight:900; color:rgba(11,18,32,.92);\">" + title + "</div>" +
+            "<div style=\"display:flex; justify-content:space-between; gap:12px; align-items:baseline; margin-top:8px; flex-wrap:wrap;\">" +
+              "<div style=\"font-size:30px; font-weight:900; color:#b91c1c;\">" + money(amount) + "</div>" +
+              "<div style=\"font-size:13px; font-weight:900; color:#b91c1c;\">" + pctText + "</div>" +
+            "</div>" +
+            "<div style=\"font-size:12px; color:rgba(11,18,32,.74); line-height:1.5; margin-top:8px;\">" + desc + "</div>" +
+          "</div>";
+      }
+
+      // Executive summary
+      var out = "";
+      out += box(
+        "Budget ADV sprecato (mensile)",
+        r.wasteEur,
+        wastePctTxt,
+        "Quota prudenziale di budget che oggi non produce miglioramento misurabile (allocazione/targeting/messaggio/attribuzione)."
+      );
+      out += box(
+        "Fatturato perso (mensile)",
+        r.lossEur,
+        lossPctTxt,
+        "Quota prudenziale di fatturato potenziale non catturata per mancanza di processo, controllo operativo e sinergia vendite→marketing."
+      );
+
+      // Placeholder “report completo” (nel pezzo 3 lo sostituiamo con checklist super completa per area)
+      out += "" +
+        "<div style=\"border:1px solid rgba(11,18,32,.12); background:#fff; border-radius:18px; padding:14px; margin-top:12px;\">" +
+          "<div style=\"font-size:14px; font-weight:900; color:#0b1220;\">Checklist MarkSelling — cosa implementare</div>" +
+          "<div style=\"margin-top:6px; font-size:12px; color:rgba(11,18,32,.72); line-height:1.55;\">" +
+            "Nel prossimo blocco attiviamo il report completo in 3 aree (Setup/Tracciamento, Controllo Vendite, Vendite→Marketing) con: " +
+            "tag obbligatori, scoring, automazioni WhatsApp, workflow per azioni, script & QA call, report per annuncio, KPI macro+micro e alert." +
+          "</div>" +
+          "<ul style=\"margin:10px 0 0 0; padding-left:18px; font-size:12px; color:rgba(11,18,32,.82);\">" +
+            "<li>Tracciamento UTM e report per singolo annuncio (campagna/adset/creative)</li>" +
+            "<li>Tag obbligatori di esito (motivi perdita) e report per annuncio</li>" +
+            "<li>Lead scoring e routing: caldo/tiepido/freddo</li>" +
+            "<li>Workflow e WhatsApp: contatto immediato + recupero</li>" +
+            "<li>Regole vendite: SLA 10 min, 5 tentativi, script + controllo qualità chiamate</li>" +
+            "<li>Dashboard KPI macro+micro e alert automatici quando peggiorano</li>" +
+          "</ul>" +
+        "</div>";
+
+      // CTA (invariata)
+      out += "" +
+        "<div style=\"display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;\">" +
+          "<a href=\"https://www.markselling.it/booking-audit/\" style=\"flex:1 1 220px; text-decoration:none; text-align:center; " +
+          "background:#DC2626; color:#fff; padding:13px 14px; border-radius:14px; font-weight:900; border:1px solid rgba(0,0,0,.18);\">" +
+            "Prenota Audit" +
+          "</a>" +
+          "<button type=\"button\" onclick=\"MS_TF.back()\" style=\"flex:1 1 160px; cursor:pointer; " +
+          "border:1px solid rgba(11,18,32,.14); background:#ffffff; color:#0b1220; " +
+          "padding:13px 14px; border-radius:14px; font-weight:900;\">" +
+            "Torna alle risposte" +
+          "</button>" +
+        "</div>";
+
+      return out;
     },
-    function () { return true; }
+    function(){ return true; }
   );
 
-  /* ---------------------------
-     VIEW MODE: ?msr=...
-  --------------------------- */
-  function tryRenderSharedViewMode() {
-    var shared = getSharedPayloadFromUrl();
-    if (!shared || !shared.report) return false;
+  // ============ ENGINE ============
+  var i = 0;
 
-    var stepQ = $("ms_step_question");
-    var stepS = $("ms_step_sub");
-    var body = $("ms_step_body");
-    var backBtn = $("ms_back_btn");
-    var nextBtn = $("ms_next_btn");
-    var err = $("ms_err");
-    var prog = $("ms_progress_wrap");
-    var nav = $("ms_nav");
+  function render(){
+    var step = steps[i];
 
-    if (stepQ) stepQ.textContent = "Report MarkSelling (condiviso)";
-    if (stepS) stepS.textContent = "Vista sola lettura: analisi operativa + checklist implementazione.";
-    if (body) body.innerHTML = renderReportHTML(shared);
+    // progress
+    var pct = Math.round(((i+1) / steps.length) * 100);
+    if($("ms_prog_label")) $("ms_prog_label").textContent = "Domanda " + (i+1) + " di " + steps.length;
+    if($("ms_prog_pct")) $("ms_prog_pct").textContent = pct + "%";
+    if($("ms_prog_bar")) $("ms_prog_bar").style.width = pct + "%";
 
-    if (backBtn) backBtn.style.display = "none";
-    if (nextBtn) nextBtn.style.display = "none";
-    if (err) err.style.display = "none";
-    if (prog) prog.style.display = "none";
-    if (nav) nav.style.display = "none";
+    // titles
+    if($("ms_step_question")) $("ms_step_question").textContent = step.q;
+    if($("ms_step_sub")) $("ms_step_sub").textContent = step.sub;
 
-    window.MS_TF._lastSharePayload = shared;
-    return true;
+    // body
+    if($("ms_step_body")){
+      $("ms_step_body").innerHTML = step.render();
+    }
+
+    // buttons
+    if($("ms_back_btn")) $("ms_back_btn").style.display = (i === 0) ? "none" : "inline-flex";
+    if($("ms_next_btn")) $("ms_next_btn").textContent = (i === steps.length - 1) ? "Fine" : "Avanti →";
+
+    showErr(false);
   }
 
-  /* ---------------------------
-     INIT
-  --------------------------- */
-  function wireNav() {
-    var backBtn = $("ms_back_btn");
-    var nextBtn = $("ms_next_btn");
-    if (backBtn) backBtn.addEventListener("click", back);
-    if (nextBtn) nextBtn.addEventListener("click", next);
+  function next(){
+    var step = steps[i];
+    if(step.validate && !step.validate()){
+      showErr(true);
+      return;
+    }
+    showErr(false);
+    pulseSaved();
+
+    if(i < steps.length - 1){
+      i++;
+      render();
+      scrollToTopForm();
+    }
   }
 
-  function init() {
-    // view-only
-    if (tryRenderSharedViewMode()) return;
-
-    wireNav();
-    renderCurrent();
-
-    // bind yes/no click handlers after render
-    // (rebind ad ogni renderCurrent)
-    var _origRender = renderCurrent;
-    renderCurrent = function () {
-      _origRender();
-      bindYesNo();
-    };
-    renderCurrent();
+  function back(){
+    if(i > 0){
+      i--;
+      render();
+      scrollToTopForm();
+    }
   }
 
-  if (document.readyState === "loading") {
+  function reset(){
+    // reset S
+    S.budget = null;
+    S.rev = null;
+
+    S.crmOk = null;
+    S.crmFeat.tags = null;
+    S.crmFeat.score = null;
+    S.crmFeat.wf = null;
+    S.crmFeat.alerts = null;
+
+    S.crmChan.wa = null;
+    S.crmChan.email = null;
+
+    S.utm.used = null;
+    S.utm.savedInCrm = null;
+    S.utm.reportByAd = null;
+
+    S.kpi.macro = null;
+    S.kpi.micro = null;
+    S.kpi.daily = null;
+    S.kpi.alerting = null;
+
+    S.align = null;
+
+    S.salesControls.c10 = null;
+    S.salesControls.c5 = null;
+    S.salesControls.script = null;
+    S.salesControls.rec = null;
+
+    Object.keys(S.fb).forEach(function(k){ S.fb[k] = false; });
+
+    S._result = null;
+
+    i = 0;
+    render();
+    scrollToTopForm();
+  }
+
+  // ============ PUBLIC API (used by index.html onclick) ============
+  window.MS_TF = {
+    next: next,
+    back: back,
+    reset: reset,
+
+    setNumber: function(key, value){
+      S[key] = safeNum(value);
+    },
+
+    setBool: function(path, val){
+      setPath(S, path, !!val);
+      // dopo selezione radio, nascondi errore
+      showErr(false);
+    },
+
+    setEnum: function(path, val){
+      setPath(S, path, val);
+      showErr(false);
+    },
+
+    toggleTag: function(path, checked){
+      setPath(S, path, !!checked);
+      showErr(false);
+    },
+
+    // debug opzionale
+    _getState: function(){ return JSON.parse(JSON.stringify(S)); },
+    _calc: calc
+  };
+
+  // ============ INIT ============
+  function init(){
+    render();
+  }
+
+  if(document.readyState === "loading"){
     document.addEventListener("DOMContentLoaded", init);
-  } else {
+  }else{
     init();
   }
 
 })();
+      // ==============================
+      // REPORT COMPLETO (3 AREE)
+      // ==============================
+
+      function covFB(){
+        var keys = Object.keys(S.fb || {});
+        var ok = 0;
+        keys.forEach(function(k){ if(S.fb[k]) ok++; });
+        return { ok: ok, total: keys.length };
+      }
+
+      function badge(text){
+        return "<span style=\"display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;border:1px solid rgba(11,18,32,.12);background:#fff;font-size:12px;font-weight:900;color:rgba(11,18,32,.78);\">" + esc(text) + "</span>";
+      }
+
+      function sectionTitle(t){
+        return "<div style=\"font-size:14px;font-weight:900;color:#0b1220;margin:14px 0 10px;\">" + esc(t) + "</div>";
+      }
+
+      function list(title, arr){
+        if(!arr || !arr.length) return "";
+        var li = arr.map(function(x){
+          return "<li style=\"margin:0 0 6px 0;line-height:1.45;\">" + esc(x) + "</li>";
+        }).join("");
+        return "" +
+          "<div style=\"margin-top:10px;\">" +
+            "<div style=\"font-size:12px;font-weight:900;color:rgba(11,18,32,.82);margin-bottom:8px;\">" + esc(title) + "</div>" +
+            "<ul style=\"margin:0;padding-left:18px;font-size:12px;color:rgba(11,18,32,.82);\">" + li + "</ul>" +
+          "</div>";
+      }
+
+      function card(title, why, impact, bullets){
+        return "" +
+          "<div style=\"border:1px solid rgba(11,18,32,.12);background:#fff;border-radius:16px;padding:14px;margin-bottom:12px;box-shadow:0 10px 26px rgba(11,18,32,.06);\">" +
+            "<div style=\"display:flex;gap:10px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;\">" +
+              "<div style=\"min-width:240px;flex:1 1 auto;\">" +
+                "<div style=\"font-size:13px;font-weight:900;color:#0b1220;\">" + esc(title) + "</div>" +
+                (why ? "<div style=\"margin-top:6px;font-size:12px;color:rgba(11,18,32,.72);line-height:1.5;\">" + esc(why) + "</div>" : "") +
+              "</div>" +
+              "<div style=\"flex:0 0 auto;text-align:right;\">" +
+                "<div style=\"font-size:11px;font-weight:900;color:rgba(11,18,32,.62);\">Impatto stimato</div>" +
+                "<div style=\"font-size:18px;font-weight:900;color:#b91c1c;margin-top:2px;\">" + money(impact) + "</div>" +
+              "</div>" +
+            "</div>" +
+            list("Cosa implementare (checklist operativa)", bullets) +
+          "</div>";
+      }
+
+      function tableTags(){
+        var TAGS = [
+          ["Fuori target","Mismatch con pubblico ideale"],
+          ["Fuori budget","Capacità di spesa non compatibile"],
+          ["Non idoneo","Non rientra nei requisiti"],
+          ["Non pronto","Timing e priorità"],
+          ["Blocco fiducia brand","Autorità percepita"],
+          ["Blocco fiducia prodotto/servizio","Scetticismo / prova"],
+          ["Blocco prezzo/valore","Percezione valore"],
+          ["Ha scelto competitor","Alternativa preferita"],
+          ["Non qualificato (bad data / no risposta)","Reperibilità e qualità contatto"]
+        ];
+        var rows = TAGS.map(function(r){
+          return "<tr>" +
+            "<td style=\"padding:10px 10px;border-top:1px solid rgba(11,18,32,.10);font-weight:900;\">" + esc(r[0]) + "</td>" +
+            "<td style=\"padding:10px 10px;border-top:1px solid rgba(11,18,32,.10);color:rgba(11,18,32,.75);font-size:12px;\">" + esc(r[1]) + "</td>" +
+          "</tr>";
+        }).join("");
+
+        return "" +
+          "<div style=\"margin-top:10px;border:1px solid rgba(11,18,32,.12);border-radius:14px;overflow:hidden;\">" +
+            "<table style=\"width:100%;border-collapse:collapse;font-size:12px;\">" +
+              "<thead>" +
+                "<tr style=\"background:rgba(11,18,32,.04);\">" +
+                  "<th style=\"text-align:left;padding:10px 10px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;\">Tag obbligatori</th>" +
+                  "<th style=\"text-align:left;padding:10px 10px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;\">Significato</th>" +
+                "</tr>" +
+              "</thead>" +
+              "<tbody>" + rows + "</tbody>" +
+            "</table>" +
+          "</div>";
+      }
+
+      // ---- KPI consigliati (macro/micro) ----
+      var KPI_MACRO = [
+        "CPL reale (per campagna/adset/annuncio)",
+        "% Lead → Contatto (contact rate)",
+        "% Contatto → Appuntamento",
+        "% Appuntamento → Show (show rate)",
+        "% Show → Vendita (close rate)",
+        "CPA reale (costo per vendita)",
+        "Ticket medio / Ricavo medio",
+        "ROAS / MER (se applicabile)"
+      ];
+
+      var KPI_MICRO = [
+        "Tempo medio primo contatto (SLA 10 min)",
+        "Tentativi medi per lead (regola 5 tentativi)",
+        "Recovery rate (lead non risponde / no-show recuperati)",
+        "Motivo perdita (tag) per annuncio e pubblico",
+        "Obiezioni top per segmento (prezzo/valore, fiducia, competitor)",
+        "Distribuzione pipeline + tempo per stato",
+        "Qualità chiamate (aderenza script / QA score)"
+      ];
+
+      var ALERTS = [
+        "Alert se tempo primo contatto > 10 min",
+        "Alert se contact rate scende sotto soglia",
+        "Alert se no-show sale oltre soglia",
+        "Alert se close rate cala (per segmento/score)",
+        "Alert se cresce 'Fuori target' su una campagna",
+        "Alert se aumenta 'Prezzo/valore' (messaggio/offerta da rivedere)"
+      ];
+
+      // ---- Impatti per aree (ripartizione prudenziale) ----
+      var waste = safeNum(r.wasteEur);
+      var loss  = safeNum(r.lossEur);
+
+      var poolA1 = waste * 0.60;              // setup/tracciamento → spreco
+      var poolA2 = loss  * 0.55;              // vendite → fatturato
+      var poolA3 = (waste * 0.40) + (loss * 0.45); // sinergia → entrambi
+
+      // ---- Stato (cosa manca) ----
+      var fb = covFB();
+
+      var missing = {
+        crm: (S.crmOk === false),
+        utm: (S.utm.used === false),
+        utmSave: (S.utm.savedInCrm === false),
+        byAd: (S.utm.reportByAd === false),
+        tags: (S.crmFeat.tags === false),
+        score: (S.crmFeat.score === false),
+        wf: (S.crmFeat.wf === false),
+        wa: (S.crmChan.wa === false),
+        c10: (S.salesControls.c10 === false),
+        c5: (S.salesControls.c5 === false),
+        script: (S.salesControls.script === false),
+        align: (S.align === "mai" || S.align === "mensile"),
+        macro: (S.kpi.macro === false),
+        micro: (S.kpi.micro === false),
+        daily: (S.kpi.daily === false),
+        alerting: (S.kpi.alerting === false)
+      };
+
+      // ---- Executive + Diagnosi rapida ----
+      out += "" +
+        "<div style=\"margin-top:12px;border:1px solid rgba(11,18,32,.12);background:#fff;border-radius:18px;padding:14px;\">" +
+          "<div style=\"display:flex;gap:10px;flex-wrap:wrap;\">" +
+            badge(\"Tracciamento UTM: \" + (missing.utm ? \"NO\" : \"SÌ\")) +
+            badge(\"Report per annuncio: \" + (missing.byAd ? \"NO\" : \"SÌ\")) +
+            badge(\"SLA 10 min: \" + (missing.c10 ? \"NO\" : \"SÌ\")) +
+            badge(\"Allineamento: \" + (S.align ? S.align.toUpperCase() : \"—\")) +
+          "</div>" +
+          "<div style=\"margin-top:10px;font-size:12px;color:rgba(11,18,32,.72);line-height:1.55;\">" +
+            "Questa è una <b>checklist operativa MarkSelling</b>: non ti dice “cosa sarebbe bello avere”, ma cosa devi implementare " +
+            "per togliere lo scaricabarile e far guidare il marketing dai micro-dati delle vendite." +
+          "</div>" +
+        "</div>";
+
+      // ==============================
+      // AREA 0 — TAG OBBLIGATORI + KPI
+      // ==============================
+      out += "" +
+        "<div style=\"margin-top:12px;border:1px solid rgba(11,18,32,.12);background:#fff;border-radius:18px;padding:14px;\">" +
+          "<div style=\"font-size:14px;font-weight:900;color:#0b1220;\">Base obbligatoria (senza questa, l’ADV è cieca)</div>" +
+          "<div style=\"margin-top:6px;font-size:12px;color:rgba(11,18,32,.72);line-height:1.55;\">" +
+            "Motivi perdita tracciati oggi: <b>" + fb.ok + "</b> su <b>" + fb.total + "</b>. Nel MarkSelling devono essere <b>obbligatori</b> su ogni opportunità persa/chiusa." +
+          "</div>" +
+          tableTags() +
+          "<div style=\"margin-top:12px;border:1px solid rgba(11,18,32,.10);border-radius:16px;padding:12px;\">" +
+            "<div style=\"font-size:13px;font-weight:900;color:#0b1220;\">KPI da monitorare (macro + micro)</div>" +
+            "<div style=\"margin-top:8px;font-size:12px;font-weight:900;color:rgba(11,18,32,.75);\">Macro KPI</div>" +
+            "<ul style=\"margin:6px 0 0 0;padding-left:18px;font-size:12px;color:rgba(11,18,32,.82);\">" +
+              KPI_MACRO.map(function(x){ return \"<li style='margin:0 0 6px 0;line-height:1.45;'>\"+esc(x)+\"</li>\"; }).join(\"\") +
+            "</ul>" +
+            "<div style=\"margin-top:10px;font-size:12px;font-weight:900;color:rgba(11,18,32,.75);\">Micro KPI</div>" +
+            "<ul style=\"margin:6px 0 0 0;padding-left:18px;font-size:12px;color:rgba(11,18,32,.82);\">" +
+              KPI_MICRO.map(function(x){ return \"<li style='margin:0 0 6px 0;line-height:1.45;'>\"+esc(x)+\"</li>\"; }).join(\"\") +
+            "</ul>" +
+          "</div>" +
+        "</div>";
+
+      // ==============================
+      // AREA 1 — SETUP & TRACCIAMENTO
+      // ==============================
+      out += "" +
+        "<div style=\"margin-top:12px;border:1px solid rgba(11,18,32,.12);background:#fff;border-radius:18px;padding:14px;\">" +
+          "<div style=\"display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap;\">" +
+            "<div>" +
+              "<div style=\"font-size:14px;font-weight:900;color:#0b1220;\">Area 1 — Setup & Tracciamento</div>" +
+              "<div style=\"margin-top:6px;font-size:12px;color:rgba(11,18,32,.72);line-height:1.55;\">Obiettivo: attribuzione certa e controllo del flusso lead→pipeline→vendita.</div>" +
+            "</div>" +
+            "<div style=\"text-align:right;\">" +
+              "<div style=\"font-size:11px;font-weight:900;color:rgba(11,18,32,.62);\">Impatto stimato area</div>" +
+              "<div style=\"font-size:18px;font-weight:900;color:#b91c1c;margin-top:2px;\">" + money(poolA1) + "</div>" +
+            "</div>" +
+          "</div>" +
+          "<div style=\"margin-top:12px;\">" +
+            (missing.crm ? card(
+              "CRM non usato come centro operativo",
+              "Senza CRM operativo non esiste controllo: il marketing ottimizza su KPI parziali e le vendite restano improvvisazione.",
+              poolA1 * 0.30,
+              [
+                "Centralizza tutti i lead nel CRM (form, WhatsApp, email, chiamate).",
+                "Pipeline con stati chiari + responsabilità (chi fa cosa e quando).",
+                "Ogni lead deve avere: fonte/UTM, stato pipeline, owner, next action."
+              ]
+            ) : "") +
+            (missing.utm ? card(
+              "UTM obbligatori su ogni annuncio",
+              "Se non sai da quale annuncio nasce ogni opportunità, stai finanziando creatività/pubblici sbagliati senza saperlo.",
+              poolA1 * 0.22,
+              [
+                "UTM su campagna/adset/annuncio/creativa.",
+                "Parametri salvati in campi dedicati nel CRM.",
+                "Lead senza UTM: segnalazione/flag (dato incompleto)."
+              ]
+            ) : "") +
+            (missing.utmSave ? card(
+              "UTM salvate nel CRM come campi (non nelle note)",
+              "Senza campi strutturati non puoi fare report automatici e perdi settimane in analisi manuali.",
+              poolA1 * 0.16,
+              [
+                "Campi CRM: utm_campaign, utm_adset, utm_ad, utm_content/creative.",
+                "Pipeline e report filtrabili per UTM.",
+                "Regola: non si lavora opportunità senza fonte."
+              ]
+            ) : "") +
+            (missing.byAd ? card(
+              "KPI + motivi perdita per singolo annuncio",
+              "Se vedi solo CPL, stai scegliendo “lead economici” e non vendite. Serve visibilità per annuncio/pubblico.",
+              poolA1 * 0.18,
+              [
+                "Report: annuncio → contact rate, show rate, close rate, CPA reale.",
+                "Motivi perdita (tag) per annuncio e pubblico.",
+                "Riallocazione budget settimanale sui pubblici migliori."
+              ]
+            ) : "") +
+            (missing.tags ? card(
+              "Tag obbligatori su ogni opportunità persa/chiusa",
+              "Senza tag obbligatori nasce lo scaricabarile: marketing e vendite non hanno una verità comune.",
+              poolA1 * 0.14,
+              [
+                "Campo obbligatorio “Motivo esito” con lista standardizzata.",
+                "Report: motivi per campagna/adset/annuncio.",
+                "Revisione settimanale top-3 motivi + azioni correttive."
+              ]
+            ) : "") +
+            (missing.score ? card(
+              "Lead Scoring (caldo/tiepido/freddo) + routing",
+              "Se tratti tutti i lead uguali perdi i migliori e sprechi tempo sui freddi.",
+              poolA1 * 0.12,
+              [
+                "Punteggi su: reply, click, visite, richieste info, interazioni WA.",
+                "Trigger: caldo → contatto immediato; tiepido → nurturing; freddo → recupero programmato.",
+                "Report conversione per fascia score."
+              ]
+            ) : "") +
+            (missing.wf ? card(
+              "Workflow basati su azioni tracciate",
+              "Senza workflow i lead vengono dimenticati e i tempi si allungano: perdi show e chiusure.",
+              poolA1 * 0.10,
+              [
+                "Post-lead (0–2 min): conferma + micro-domanda + next step.",
+                "Non risponde: sequenza 5 tentativi multicanale.",
+                "No-show: recovery + riprenotazione + reminder."
+              ]
+            ) : "") +
+            (missing.wa ? card(
+              "Automazioni WhatsApp per contatto immediato + recupero",
+              "WhatsApp aumenta velocità e contact rate: senza, perdi i primi minuti e il lead si raffredda.",
+              poolA1 * 0.08,
+              [
+                "Messaggio immediato + CTA micro (1 click).",
+                "Reminder appuntamento (24h/2h) + no-show recovery.",
+                "Messaggi dinamici per score/tag."
+              ]
+            ) : "") +
+
+            ((!missing.crm && !missing.utm && !missing.utmSave && !missing.byAd && !missing.tags && !missing.score && !missing.wf && !missing.wa)
+              ? "<div style=\"margin-top:10px;font-size:12px;font-weight:900;color:#065f46;border:1px solid rgba(34,197,94,.30);background:rgba(34,197,94,.10);padding:10px 12px;border-radius:14px;\">✓ Setup & Tracciamento: già molto solido (ottimo).</div>"
+              : ""
+            ) +
+          "</div>" +
+        "</div>";
+
+      // ==============================
+      // AREA 2 — CONTROLLO TEAM VENDITA
+      // ==============================
+      out += "" +
+        "<div style=\"margin-top:12px;border:1px solid rgba(11,18,32,.12);background:#fff;border-radius:18px;padding:14px;\">" +
+          "<div style=\"display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap;\">" +
+            "<div>" +
+              "<div style=\"font-size:14px;font-weight:900;color:#0b1220;\">Area 2 — Controllo operativo vendite</div>" +
+              "<div style=\"margin-top:6px;font-size:12px;color:rgba(11,18,32,.72);line-height:1.55;\">Obiettivo: SLA, regole misurabili, qualità chiamate, recupero lead.</div>" +
+            "</div>" +
+            "<div style=\"text-align:right;\">" +
+              "<div style=\"font-size:11px;font-weight:900;color:rgba(11,18,32,.62);\">Impatto stimato area</div>" +
+              "<div style=\"font-size:18px;font-weight:900;color:#b91c1c;margin-top:2px;\">" + money(poolA2) + "</div>" +
+            "</div>" +
+          "</div>" +
+          "<div style=\"margin-top:12px;\">" +
+            (missing.c10 ? card(
+              "SLA: contatto entro 10 minuti (misurato e obbligatorio)",
+              "Il tempo di risposta è determinante: superati i primi minuti la probabilità di conversione crolla.",
+              poolA2 * 0.30,
+              [
+                "Alert immediato al setter/venditore alla creazione del lead.",
+                "Escalation automatica se >10 minuti.",
+                "Dashboard giornaliera: tempo medio primo contatto per venditore e per annuncio."
+              ]
+            ) : "") +
+            (missing.c5 ? card(
+              "Regola: 5 tentativi minimi in caso di mancata risposta",
+              "La maggior parte delle vendite perse è “silenziosa”: lead abbandonati troppo presto.",
+              poolA2 * 0.22,
+              [
+                "Sequenza consigliata: 0h (WA), 2h (call), 24h (WA), 72h (call), 7d (email/WA).",
+                "Log nel CRM di ogni tentativo (non in testa al venditore).",
+                "Report: tentativi medi e recovery rate per annuncio."
+              ]
+            ) : "") +
+            (missing.script ? card(
+              "Script setting + closing + controllo qualità",
+              "Senza script le performance oscillano e i feedback al marketing sono rumore.",
+              poolA2 * 0.24,
+              [
+                "Script setting: prequalifica (budget/need/timing), promessa, next step.",
+                "Script closing: obiezioni (prezzo/valore, fiducia, competitor) + prova sociale.",
+                "QA settimanale: score qualità chiamate + coaching correttivo."
+              ]
+            ) : "") +
+
+            "<div style=\"border:1px solid rgba(11,18,32,.12);background:#fff;border-radius:16px;padding:12px;margin-top:10px;\">" +
+              "<div style=\"font-size:13px;font-weight:900;color:#0b1220;\">Standard operativo consigliato (MarkSelling)</div>" +
+              "<ul style=\"margin:10px 0 0 0;padding-left:18px;font-size:12px;color:rgba(11,18,32,.82);\">" +
+                "<li style=\"margin:0 0 6px 0;line-height:1.45;\">Contatto entro 10 minuti (SLA) + escalation</li>" +
+                "<li style=\"margin:0 0 6px 0;line-height:1.45;\">5 tentativi minimi + recovery (non abbandono)</li>" +
+                "<li style=\"margin:0 0 6px 0;line-height:1.45;\">Profilazione lead (etichette) + routing per priorità</li>" +
+                "<li style=\"margin:0 0 6px 0;line-height:1.45;\">Note post-call standard (obiezione + next step)</li>" +
+                "<li style=\"margin:0 0 6px 0;line-height:1.45;\">Controllo qualità chiamate (campionamento settimanale)</li>" +
+              "</ul>" +
+            "</div>" +
+
+            ((!missing.c10 && !missing.c5 && !missing.script)
+              ? "<div style=\"margin-top:10px;font-size:12px;font-weight:900;color:#065f46;border:1px solid rgba(34,197,94,.30);background:rgba(34,197,94,.10);padding:10px 12px;border-radius:14px;\">✓ Operativo vendite: regole chiave già presenti (ottimo).</div>"
+              : ""
+            ) +
+          "</div>" +
+        "</div>";
+
+      // ==============================
+      // AREA 3 — SINERGIA MKT ↔ SALES
+      // ==============================
+      out += "" +
+        "<div style=\"margin-top:12px;border:1px solid rgba(11,18,32,.12);background:#fff;border-radius:18px;padding:14px;\">" +
+          "<div style=\"display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap;\">" +
+            "<div>" +
+              "<div style=\"font-size:14px;font-weight:900;color:#0b1220;\">Area 3 — Sinergia Marketing ↔ Vendite</div>" +
+              "<div style=\"margin-top:6px;font-size:12px;color:rgba(11,18,32,.72);line-height:1.55;\">Obiettivo: le vendite guidano il marketing con micro-dati, report e alert.</div>" +
+            "</div>" +
+            "<div style=\"text-align:right;\">" +
+              "<div style=\"font-size:11px;font-weight:900;color:rgba(11,18,32,.62);\">Impatto stimato area</div>" +
+              "<div style=\"font-size:18px;font-weight:900;color:#b91c1c;margin-top:2px;\">" + money(poolA3) + "</div>" +
+            "</div>" +
+          "</div>" +
+
+          "<div style=\"margin-top:12px;\">" +
+            (missing.align ? card(
+              "Allineamento dati mkt↔sales troppo raro",
+              "Se vi allineate solo “quando va male”, il budget viene bruciato prima che qualcuno intervenga.",
+              poolA3 * 0.22,
+              [
+                "Rituale settimanale: 30 minuti su dati (non opinioni).",
+                "Agenda fissa: annunci migliori/peggiori + motivi perdita + obiezioni top.",
+                "Decisioni: spegni/scala/riscrivi entro 24–72h."
+              ]
+            ) : "") +
+            (missing.macro ? card(
+              "Macro KPI end-to-end non monitorati",
+              "Se misuri solo CPL, stai ottimizzando ‘lead’, non vendite.",
+              poolA3 * 0.18,
+              [
+                "Dashboard unica: lead→contatto→app→show→vendite.",
+                "CPA reale come KPI guida.",
+                "Segmentazione per UTM/campagna/adset/annuncio."
+              ]
+            ) : "") +
+            (missing.micro ? card(
+              "Micro KPI non monitorati (motivi perdita per annuncio, tempi, tentativi)",
+              "I micro-dati vendite sono il motore della scalabilità ADV. Senza, l’ottimizzazione è cieca.",
+              poolA3 * 0.18,
+              [
+                "Motivo perdita (tag) per annuncio/pubblico.",
+                "Tempo primo contatto e tentativi medi per annuncio.",
+                "Obiezioni top per segmento e fascia score."
+              ]
+            ) : "") +
+            (missing.daily ? card(
+              "Reportistica giornaliera per annuncio/pubblico assente",
+              "Se scopri un problema a fine mese, hai già bruciato settimane di budget e vendite.",
+              poolA3 * 0.16,
+              [
+                "Report giornaliero: annuncio → qualità (contact/show/close).",
+                "Top-3 motivi perdita del giorno + task correttivi.",
+                "Controllo budget: riallocazioni rapide."
+              ]
+            ) : "") +
+            (missing.alerting ? card(
+              "Alert automatici quando le metriche peggiorano",
+              "Alert = intervento immediato. Senza alert, il degrado passa inosservato.",
+              poolA3 * 0.16,
+              [
+                "Alert su SLA, contact rate, no-show, close rate.",
+                "Alert su crescita di ‘Fuori target’ o ‘Prezzo/valore’ per campagna.",
+                "Notifica su WhatsApp/email a manager e strategist."
+              ]
+            ) : "") +
+
+            "<div style=\"border:1px solid rgba(11,18,32,.12);background:#fff;border-radius:16px;padding:12px;margin-top:10px;\">" +
+              "<div style=\"font-size:13px;font-weight:900;color:#0b1220;\">Alert consigliati (operativi)</div>" +
+              "<ul style=\"margin:10px 0 0 0;padding-left:18px;font-size:12px;color:rgba(11,18,32,.82);\">" +
+                ALERTS.map(function(x){ return \"<li style='margin:0 0 6px 0;line-height:1.45;'>\"+esc(x)+\"</li>\"; }).join(\"\") +
+              "</ul>" +
+            "</div>" +
+
+            ((!missing.align && !missing.macro && !missing.micro && !missing.daily && !missing.alerting)
+              ? "<div style=\"margin-top:10px;font-size:12px;font-weight:900;color:#065f46;border:1px solid rgba(34,197,94,.30);background:rgba(34,197,94,.10);padding:10px 12px;border-radius:14px;\">✓ Sinergia marketing↔vendite: struttura già avanzata (ottimo).</div>"
+              : ""
+            ) +
+          "</div>" +
+        "</div>";
