@@ -3,141 +3,321 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>MarkSelling — Simulatore</title>
+  <title>MarkSelling — Simulatore Sprechi</title>
 
-  <!-- FONT -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700;800;900&display=swap" rel="stylesheet"/>
+
+  <style>
+    /* ====== Base ====== */
+    :root{
+      --bg:#ffffff;
+      --text:#0b1220;
+      --muted:rgba(11,18,32,.72);
+      --muted2:rgba(11,18,32,.55);
+      --border:rgba(11,18,32,.12);
+      --shadow:0 22px 60px rgba(11,18,32,.10);
+      --shadowSoft:0 14px 34px rgba(11,18,32,.06);
+
+      /* Accent (puoi cambiarlo): */
+      --accent:#DC2626; /* rosso */
+      --accentSoft:rgba(220,38,38,.10);
+
+      /* Gradient solo per bottone avanti (lo avevi già); se vuoi full flat dimmelo */
+      --btnGrad: linear-gradient(135deg,#0ea5e9 0%,#2563eb 45%,#7c3aed 100%);
+    }
+
+    html,body{ height:100%; }
+    body{
+      margin:0;
+      font-family:Roboto,system-ui,-apple-system,"Segoe UI",Arial,sans-serif;
+      color:var(--text);
+      background:
+        radial-gradient(800px 420px at 20% 0%, rgba(11,18,32,.06), transparent 60%),
+        radial-gradient(700px 420px at 90% 10%, rgba(11,18,32,.05), transparent 60%),
+        #fff;
+    }
+
+    /* Wrapper */
+    .ms-wrap{
+      width:100%;
+      padding:18px 0 40px;
+    }
+    .ms-inner{
+      max-width:980px;
+      margin:0 auto;
+      padding:0 16px;
+    }
+
+    /* Topbar */
+    .ms-topbar{
+      display:flex;
+      flex-wrap:wrap;
+      gap:12px;
+      align-items:center;
+      justify-content:space-between;
+      margin-bottom:12px;
+    }
+    .ms-brand{
+      display:flex;
+      flex-direction:column;
+      gap:6px;
+    }
+    .ms-kicker{
+      font-size:12px;
+      letter-spacing:.14em;
+      text-transform:uppercase;
+      font-weight:900;
+      color:var(--muted2);
+    }
+    .ms-title{
+      font-size:22px;
+      font-weight:900;
+      line-height:1.1;
+      color:var(--text);
+    }
+
+    .ms-actions{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      flex-wrap:wrap;
+    }
+    .ms-pill{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      border:1px solid var(--border);
+      background:#fff;
+      padding:8px 10px;
+      border-radius:999px;
+      font-size:12px;
+      font-weight:900;
+      color:rgba(11,18,32,.78);
+      box-shadow:0 10px 26px rgba(11,18,32,.06);
+    }
+    .ms-btn{
+      cursor:pointer;
+      border:1px solid rgba(11,18,32,.14);
+      background:#fff;
+      color:var(--text);
+      padding:10px 12px;
+      border-radius:12px;
+      font-weight:900;
+      box-shadow:0 10px 26px rgba(11,18,32,.06);
+    }
+
+    /* Progress */
+    .ms-progress{
+      border:1px solid var(--border);
+      background:#fff;
+      border-radius:14px;
+      padding:10px 12px;
+      margin-bottom:12px;
+      box-shadow: var(--shadowSoft);
+    }
+    .ms-prow{
+      display:flex;
+      justify-content:space-between;
+      gap:10px;
+      align-items:center;
+    }
+    .ms-prow div{
+      font-size:12px;
+      font-weight:900;
+      color:rgba(11,18,32,.75);
+    }
+    .ms-bar{
+      height:8px;
+      border-radius:999px;
+      background:rgba(11,18,32,.10);
+      overflow:hidden;
+      margin-top:8px;
+    }
+    .ms-bar > div{
+      height:8px;
+      width:0%;
+      background: var(--btnGrad);
+      border-radius:999px;
+    }
+
+    /* Feedback saved */
+    .ms-saved{
+      display:none;
+      margin-bottom:12px;
+      border:1px solid rgba(34,197,94,.30);
+      background:rgba(34,197,94,.10);
+      color:#065f46;
+      border-radius:14px;
+      padding:10px 12px;
+      font-weight:900;
+      font-size:12px;
+    }
+
+    /* Card */
+    .ms-card{
+      border:1px solid var(--border);
+      background:#fff;
+      border-radius:18px;
+      box-shadow: var(--shadow);
+      overflow:hidden;
+    }
+    .ms-card-head{
+      padding:16px 16px 12px;
+      border-bottom:1px solid rgba(11,18,32,.10);
+    }
+    .ms-question{
+      font-size:26px;
+      font-weight:900;
+      color:var(--text);
+      line-height:1.15;
+    }
+    .ms-sub{
+      margin-top:10px;
+      font-size:13px;
+      color:var(--muted);
+      line-height:1.5;
+    }
+    .ms-card-body{
+      padding:16px;
+    }
+
+    /* Nav */
+    .ms-nav{
+      display:flex;
+      gap:10px;
+      margin-top:16px;
+      align-items:center;
+      flex-wrap:wrap;
+    }
+    .ms-spacer{ flex:1 1 auto; }
+
+    .ms-back{
+      cursor:pointer;
+      border:1px solid rgba(11,18,32,.14);
+      background:#fff;
+      color:var(--text);
+      padding:12px 14px;
+      border-radius:14px;
+      font-weight:900;
+      box-shadow:0 10px 26px rgba(11,18,32,.06);
+      flex:0 0 auto;
+    }
+    .ms-next{
+      cursor:pointer;
+      border:0;
+      background:var(--btnGrad);
+      color:#fff;
+      padding:12px 16px;
+      border-radius:14px;
+      font-weight:900;
+      box-shadow:0 16px 36px rgba(37,99,235,.20);
+      flex:0 0 auto;
+    }
+
+    .ms-err{
+      display:none;
+      margin-top:12px;
+      font-size:12px;
+      font-weight:900;
+      color:#b91c1c;
+      line-height:1.45;
+    }
+
+    /* Inputs inside body (app.js renderizza qui) */
+    .ms-field{
+      width:100%;
+      border:1px solid rgba(11,18,32,.14);
+      border-radius:14px;
+      padding:12px 12px;
+      font-size:14px;
+      font-weight:700;
+      outline:none;
+      background:#fff;
+      color:var(--text);
+      box-sizing:border-box;
+    }
+    .ms-field:focus{
+      border-color: rgba(11,18,32,.28);
+    }
+    .ms-hint{
+      font-size:12px;
+      color:var(--muted);
+      margin-top:8px;
+      line-height:1.45;
+    }
+
+    /* Responsive */
+    @media (max-width:520px){
+      .ms-question{ font-size:22px; }
+      .ms-title{ font-size:20px; }
+      .ms-card-body{ padding:14px; }
+      .ms-card-head{ padding:14px 14px 10px; }
+    }
+  </style>
 </head>
 
-<body style="margin:0; background:#ffffff;">
+<body>
 
-<!-- =========================
-  MARKSELLING — SIMULATORE “TYPEFORM”
-  ✅ IDs necessari per report + share + view-mode
-========================= -->
+  <div class="ms-wrap" id="ms-tf">
+    <div class="ms-inner" id="ms_top">
 
-<div id="ms-tf" style="font-family:Roboto,system-ui,-apple-system,'Segoe UI',Arial,sans-serif; background:#ffffff; color:#0b1220; width:100%; padding:18px 0;">
-  <div id="ms_top" style="max-width:980px; margin:0 auto; padding:0 16px;">
-
-    <!-- TOP BAR -->
-    <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; margin-bottom:12px;">
-      <div style="display:flex; flex-direction:column; gap:6px;">
-        <div style="font-size:12px; letter-spacing:.14em; text-transform:uppercase; font-weight:900; color:rgba(11,18,32,.55);">
-          MarkSelling — Simulatore
+      <!-- TOP BAR -->
+      <div class="ms-topbar">
+        <div class="ms-brand">
+          <div class="ms-kicker">MarkSelling — Simulatore</div>
+          <div class="ms-title">Spreco ADV & fatturato perso</div>
         </div>
-        <div id="ms_title_top" style="font-size:22px; font-weight:900; line-height:1.1; color:#0b1220;">
-          Spreco ADV & fatturato perso
+
+        <div class="ms-actions">
+          <div class="ms-pill">📅 Risultati mensili</div>
+          <button type="button" class="ms-btn" onclick="MS_TF.reset()">Azzera</button>
         </div>
       </div>
 
-      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-        <div style="
-          display:inline-flex; align-items:center; gap:8px;
-          border:1px solid rgba(11,18,32,.12);
-          background:#ffffff;
-          padding:8px 10px; border-radius:999px;
-          font-size:12px; font-weight:900; color:rgba(11,18,32,.78);
-          box-shadow:0 10px 26px rgba(11,18,32,.06);
-        ">
-          📅 Risultati mensili
+      <!-- PROGRESS -->
+      <div class="ms-progress" id="ms_progress_wrap">
+        <div class="ms-prow">
+          <div id="ms_prog_label">—</div>
+          <div id="ms_prog_pct">—</div>
+        </div>
+        <div class="ms-bar">
+          <div id="ms_prog_bar"></div>
+        </div>
+      </div>
+
+      <!-- SAVED STRIP -->
+      <div class="ms-saved" id="ms_saved">✓ Risposta registrata</div>
+
+      <!-- CARD -->
+      <div class="ms-card">
+
+        <div class="ms-card-head">
+          <div class="ms-question" id="ms_step_question">—</div>
+          <div class="ms-sub" id="ms_step_sub">—</div>
         </div>
 
-        <button id="ms_reset_btn" type="button" onclick="MS_TF.reset()"
-          style="
-            cursor:pointer; border:1px solid rgba(11,18,32,.14);
-            background:#ffffff; color:#0b1220;
-            padding:10px 12px; border-radius:12px; font-weight:900;
-            box-shadow:0 10px 26px rgba(11,18,32,.06);
-          ">
-          Azzera
-        </button>
+        <div class="ms-card-body">
+          <!-- app.js renderizza qui i campi -->
+          <div id="ms_step_body"></div>
+
+          <div class="ms-nav" id="ms_nav">
+            <button id="ms_back_btn" class="ms-back" type="button" onclick="MS_TF.back()">← Indietro</button>
+            <div class="ms-spacer"></div>
+            <button id="ms_next_btn" class="ms-next" type="button" onclick="MS_TF.next()">Avanti →</button>
+          </div>
+
+          <div class="ms-err" id="ms_err">Seleziona una risposta per continuare.</div>
+        </div>
+
       </div>
+
     </div>
-
-    <!-- PROGRESS (ID richiesto) -->
-    <div id="ms_progress_wrap" style="border:1px solid rgba(11,18,32,.12); background:#ffffff; border-radius:14px; padding:10px 12px; margin-bottom:12px; box-shadow:0 14px 34px rgba(11,18,32,.06);">
-      <div style="display:flex; justify-content:space-between; gap:10px; align-items:center;">
-        <div id="ms_prog_label" style="font-size:12px; font-weight:900; color:rgba(11,18,32,.75);">—</div>
-        <div id="ms_prog_pct" style="font-size:12px; font-weight:900; color:rgba(11,18,32,.75);">—</div>
-      </div>
-      <div style="height:8px; border-radius:999px; background:rgba(11,18,32,.10); overflow:hidden; margin-top:8px;">
-        <div id="ms_prog_bar" style="height:8px; width:0%; background:linear-gradient(135deg,#0ea5e9 0%,#2563eb 45%,#7c3aed 100%); border-radius:999px;"></div>
-      </div>
-    </div>
-
-    <!-- FEEDBACK STRIP -->
-    <div id="ms_saved"
-      style="
-        display:none;
-        margin-bottom:12px;
-        border:1px solid rgba(34,197,94,.30);
-        background:rgba(34,197,94,.10);
-        color:#065f46;
-        border-radius:14px;
-        padding:10px 12px;
-        font-weight:900;
-        font-size:12px;
-      ">
-      ✓ Risposta registrata
-    </div>
-
-    <!-- CARD -->
-    <div style="
-      border:1px solid rgba(11,18,32,.12);
-      background:#ffffff;
-      border-radius:18px;
-      box-shadow:0 22px 60px rgba(11,18,32,.10);
-      overflow:hidden;
-    ">
-
-      <!-- HEADER INSIDE CARD -->
-      <div style="padding:16px 16px 12px; border-bottom:1px solid rgba(11,18,32,.10);">
-        <div id="ms_step_question" style="font-size:26px; font-weight:900; color:#0b1220; line-height:1.15;">—</div>
-        <div id="ms_step_sub" style="margin-top:10px; font-size:13px; color:rgba(11,18,32,.72); line-height:1.5;">—</div>
-      </div>
-
-      <!-- BODY -->
-      <div style="padding:16px;">
-        <div id="ms_step_body"></div>
-
-        <!-- NAV (ID richiesto) -->
-        <div id="ms_nav" style="display:flex; gap:10px; margin-top:16px; align-items:center; flex-wrap:wrap;">
-          <button id="ms_back_btn" type="button" onclick="MS_TF.back()"
-            style="
-              cursor:pointer; border:1px solid rgba(11,18,32,.14);
-              background:#ffffff; color:#0b1220;
-              padding:12px 14px; border-radius:14px; font-weight:900;
-              box-shadow:0 10px 26px rgba(11,18,32,.06);
-              flex:0 0 auto;
-            ">
-            ← Indietro
-          </button>
-
-          <div style="flex:1 1 auto;"></div>
-
-          <button id="ms_next_btn" type="button" onclick="MS_TF.next()"
-            style="
-              cursor:pointer; border:0;
-              background:linear-gradient(135deg,#0ea5e9 0%,#2563eb 45%,#7c3aed 100%);
-              color:#fff; padding:12px 16px; border-radius:14px; font-weight:900;
-              box-shadow:0 16px 36px rgba(37,99,235,.20);
-              flex:0 0 auto;
-            ">
-            Avanti →
-          </button>
-        </div>
-
-        <div id="ms_err" style="display:none; margin-top:12px; font-size:12px; font-weight:900; color:#b91c1c; line-height:1.45;">
-          Seleziona una risposta per continuare.
-        </div>
-      </div>
-    </div>
-
   </div>
-</div>
 
-<!-- ✅ app.js va SOLO QUI, in fondo -->
-<script src="./app.js"></script>
+  <!-- APP JS -->
+  <script src="./app.js"></script>
 
 </body>
 </html>
