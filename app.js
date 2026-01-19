@@ -700,7 +700,7 @@
             tableTags() +
             "<div style=\"margin-top:12px;border:1px solid rgba(11,18,32,.10);border-radius:16px;padding:12px;\">" +
               "<div style=\"font-size:13px;font-weight:900;color:#0b1220;\">KPI da monitorare (macro + micro)</div>" +
-              "<div style=\"margin"<div style=\"margin-top:8px;font-size:12px;font-weight:900;color:rgba(11,18,32,.75);\">Macro KPI</div>" +
+              "<div style=\"margin-top:8px;font-size:12px;font-weight:900;color:rgba(11,18,32,.75);\">Macro KPI</div>" +
               "<ul style=\"margin:6px 0 0 0;padding-left:18px;font-size:12px;color:rgba(11,18,32,.82);\">" +
                 KPI_MACRO.map(function(x){ return "<li style='margin:0 0 6px 0;line-height:1.45;'>"+esc(x)+"</li>"; }).join("") +
               "</ul>" +
